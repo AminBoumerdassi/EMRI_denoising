@@ -44,7 +44,7 @@ n_channels=len(TDI_channels)#channel 1 is real strain component, channel 2 the i
 add_noise=True
 
 #Setting training hyperparameters
-epochs=40#150#5#0#600#5
+epochs=20#150#5#0#600#5
 
 
 #Model
@@ -92,11 +92,17 @@ model.add(Activation("linear", dtype="float32"))
 #Choose an optimiser
 #optimizer= Adafactor()
 
+'''On the choice of loss functions:
+1. We could get signficant time savings by using a cupy-based loss function.
+Need to see how much of a difference there is when MSE is calculated with xp vs np
+
+2. Also worth trying out the overlap/mismatch as a loss function.'''
+
 model.compile(optimizer=Adam(), loss="mse")#optimizer="Adam", jit_compile=True
 model.summary()
 
 #Initialise data generator, and declare its parameters
-training_and_validation_generator= EMRIGeneratorTDI(EMRI_params_dir="training_data/EMRI_params_SNRs_20_100_fixed_redshift.npy", batch_size=batch_size,  dim=len_seq, dt=dt, TDI_channels=TDI_channels, add_noise=add_noise)
+training_and_validation_generator= EMRIGeneratorTDI(EMRI_params_dir="training_data/EMRI_params_SNRs_20_100_fixed_redshift.npy", batch_size=batch_size,  dim=len_seq, dt=dt, TDI_channels=TDI_channels)#, add_noise=add_noise
 training_and_validation_generator.declare_generator_params()
 
 #Initialise callbacks
@@ -111,9 +117,9 @@ history = model.fit(training_and_validation_generator, epochs=epochs, validation
 model.save("model_INSERT_SLURM_ID.keras")
 
 #Plot losses
-plt.plot(history.epoch, history.history["loss"], "blue", label='Training loss')
-plt.plot(history.epoch, history.history["val_loss"], "orange", label='Validation loss')
-plt.plot(history.epoch, TestOnNoise.losses, "green", label="Noise loss")
+plt.plot(history.epoch, history.history["loss"], "blue", label='Training')
+plt.plot(history.epoch, history.history["val_loss"], "orange", label='Validation')
+plt.plot(history.epoch, TestOnNoise.losses, "green", label="LISA noise")
 plt.title('Training loss')
 plt.xlabel('Epochs')
 plt.ylabel('Loss')

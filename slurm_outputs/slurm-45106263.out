@@ -1,0 +1,115 @@
+
+The following modules were not unloaded:
+   (Use "module --force purge" to unload all):
+
+  1) XALT/minimal   2) slurm   3) NeSI
+2024-03-28 13:59:01.258413: E tensorflow/compiler/xla/stream_executor/cuda/cuda_dnn.cc:9342] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+2024-03-28 13:59:01.258515: E tensorflow/compiler/xla/stream_executor/cuda/cuda_fft.cc:609] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+2024-03-28 13:59:01.258555: E tensorflow/compiler/xla/stream_executor/cuda/cuda_blas.cc:1518] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+2024-03-28 13:59:01.270982: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2024-03-28 13:59:05.923065: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1886] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 38298 MB memory:  -> device: 0, name: NVIDIA A100-PCIE-40GB, pci bus id: 0000:83:00.0, compute capability: 8.0
+1 Physical GPUs, 1 Logical GPUs
+Model: "sequential"
+_________________________________________________________________
+ Layer (type)                Output Shape              Param #   
+=================================================================
+ conv1d (Conv1D)             (None, 1048576, 32)       8224      
+                                                                 
+ conv1d_1 (Conv1D)           (None, 262144, 16)        65552     
+                                                                 
+ conv1d_2 (Conv1D)           (None, 65536, 8)          16392     
+                                                                 
+ conv1d_transpose (Conv1DTr  (None, 262144, 8)         8200      
+ anspose)                                                        
+                                                                 
+ conv1d_transpose_1 (Conv1D  (None, 1048576, 16)       16400     
+ Transpose)                                                      
+                                                                 
+ conv1d_transpose_2 (Conv1D  (None, 4194304, 32)       65568     
+ Transpose)                                                      
+                                                                 
+ conv1d_transpose_3 (Conv1D  (None, 4194304, 2)        66        
+ Transpose)                                                      
+                                                                 
+ activation (Activation)     (None, 4194304, 2)        0         
+                                                                 
+=================================================================
+Total params: 180402 (704.70 KB)
+Trainable params: 180402 (704.70 KB)
+Non-trainable params: 0 (0.00 Byte)
+_________________________________________________________________
+#################################
+####DATA GENERATOR PARAMETERS####
+#Batch size:  8
+#Time in years: 1.3290715810104465
+#n_channels:  2
+#dt:  10
+#Length of timeseries: 4194304
+#################################
+Epoch 1/20
+2024-03-28 13:59:30.448429: I tensorflow/compiler/xla/stream_executor/cuda/cuda_dnn.cc:442] Loaded cuDNN version 8600
+2024-03-28 14:02:13.100868: I tensorflow/compiler/xla/service/service.cc:168] XLA service 0x2aac19015900 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
+2024-03-28 14:02:13.100944: I tensorflow/compiler/xla/service/service.cc:176]   StreamExecutor device (0): NVIDIA A100-PCIE-40GB, Compute Capability 8.0
+2024-03-28 14:02:13.119392: I tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.cc:269] disabling MLIR crash reproducer, set env var `MLIR_CRASH_REPRODUCER_DIRECTORY` to enable.
+2024-03-28 14:02:13.122432: I tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.cc:269] disabling MLIR crash reproducer, set env var `MLIR_CRASH_REPRODUCER_DIRECTORY` to enable.
+2024-03-28 14:02:13.609931: I ./tensorflow/compiler/jit/device_compiler.h:186] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
+Noise loss:  0.0005537663353143145
+8/8 - 218s - loss: 3.9303e-04 - val_loss: 4.6700e-05 - 218s/epoch - 27s/step
+Epoch 2/20
+Noise loss:  0.0002553393252892271
+8/8 - 51s - loss: 6.8815e-05 - val_loss: 5.9159e-05 - 51s/epoch - 6s/step
+Epoch 3/20
+Noise loss:  0.0001187100990880447
+8/8 - 55s - loss: 2.3367e-05 - val_loss: 1.8592e-05 - 55s/epoch - 7s/step
+Epoch 4/20
+Noise loss:  5.792573585870246e-05
+8/8 - 57s - loss: 2.8171e-05 - val_loss: 2.6164e-05 - 57s/epoch - 7s/step
+Epoch 5/20
+Noise loss:  3.1783269916301065e-05
+8/8 - 57s - loss: 1.1900e-05 - val_loss: 1.1068e-05 - 57s/epoch - 7s/step
+Epoch 6/20
+Noise loss:  1.9697746076267353e-05
+8/8 - 59s - loss: 3.2563e-05 - val_loss: 3.2173e-05 - 59s/epoch - 7s/step
+Epoch 7/20
+Noise loss:  1.3449350461783334e-05
+8/8 - 61s - loss: 2.2915e-05 - val_loss: 2.2708e-05 - 61s/epoch - 8s/step
+Epoch 8/20
+Noise loss:  1.0083114644557563e-05
+8/8 - 67s - loss: 8.2689e-06 - val_loss: 8.1523e-06 - 67s/epoch - 8s/step
+Epoch 9/20
+Noise loss:  8.08919431332592e-06
+8/8 - 67s - loss: 9.0536e-06 - val_loss: 8.9855e-06 - 67s/epoch - 8s/step
+Epoch 10/20
+Noise loss:  6.676909956847273e-06
+8/8 - 69s - loss: 1.1041e-05 - val_loss: 1.0995e-05 - 69s/epoch - 9s/step
+Epoch 11/20
+Noise loss:  5.661878601440389e-06
+8/8 - 69s - loss: 1.2618e-05 - val_loss: 1.2584e-05 - 69s/epoch - 9s/step
+Epoch 12/20
+Noise loss:  4.944277785102869e-06
+8/8 - 71s - loss: 1.2092e-05 - val_loss: 1.2067e-05 - 71s/epoch - 9s/step
+Epoch 13/20
+Noise loss:  4.357509068038084e-06
+8/8 - 73s - loss: 3.7958e-05 - val_loss: 3.7938e-05 - 73s/epoch - 9s/step
+Epoch 14/20
+Noise loss:  3.894102929858249e-06
+8/8 - 70s - loss: 6.1353e-05 - val_loss: 6.1338e-05 - 70s/epoch - 9s/step
+Epoch 15/20
+Noise loss:  3.5014106063835143e-06
+8/8 - 71s - loss: 1.4038e-05 - val_loss: 1.4025e-05 - 71s/epoch - 9s/step
+Epoch 16/20
+Noise loss:  3.171827227476636e-06
+8/8 - 71s - loss: 4.6528e-05 - val_loss: 4.6516e-05 - 71s/epoch - 9s/step
+Epoch 17/20
+Noise loss:  2.8930266974073625e-06
+8/8 - 70s - loss: 8.7870e-06 - val_loss: 8.7772e-06 - 70s/epoch - 9s/step
+Epoch 18/20
+Noise loss:  2.646498918183062e-06
+8/8 - 73s - loss: 1.1394e-05 - val_loss: 1.1386e-05 - 73s/epoch - 9s/step
+Epoch 19/20
+Noise loss:  2.4339859567014824e-06
+8/8 - 66s - loss: 7.9662e-06 - val_loss: 7.9587e-06 - 66s/epoch - 8s/step
+Epoch 20/20
+Noise loss:  2.247911192875832e-06
+8/8 - 60s - loss: 8.9115e-06 - val_loss: 8.9053e-06 - 60s/epoch - 7s/step
