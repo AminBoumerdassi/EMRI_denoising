@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchinfo import summary
 from src.tools.test_and_train_loop import *
-from src.tools.model_architecture import ConvAE
+from src.tools.model_architecture import *
 from few.utils.constants import YRSID_SI
 import matplotlib.pyplot as plt
 import os
@@ -36,7 +36,7 @@ torch.backends.cudnn.benchmark = True
 model_state_dict_dir= "/fred/oz303/aboumerd/EMRI_denoising/model_best_performance.pt"
 
 #Load model's weights and architecture
-model= ConvAE().to(device)
+model= Dilated_ConvAE().to(device)
 model.load_state_dict(torch.load(model_state_dict_dir, weights_only=True, map_location=device))#, map_location=device
 model.eval()
 
@@ -47,7 +47,7 @@ fs=1/dt
 T= dim*dt/round(YRSID_SI)#Not actually input into the generator, it already calculates this and stores as an attribute
 TDI_channels="AE"
 n_channels=len(TDI_channels)
-add_noise=True#False
+add_noise=False
 seed=2023
 batch_size=4
 # training_target_SNR_range = [70, 80]
@@ -68,7 +68,7 @@ validation_set= EMRIGeneratorTDI(val_params, dim=dim, dt=dt, TDI_channels=TDI_ch
 
 
 #Initialise the data generators as PyTorch dataloaders
-validation_dataloader= torch.utils.data.DataLoader(validation_set, batch_size=batch_size, shuffle=True,  generator=g)
+validation_dataloader= torch.utils.data.DataLoader(validation_set, batch_size=batch_size, shuffle=False,  generator=g)
 
 #Generate one batch of data
 X_EMRIs, y_true_EMRIs = next(iter(validation_dataloader))

@@ -1,4 +1,8 @@
-.runs/
-.output_logs/
-.few_pytorch_env/
-.__pycache__
+/runs
+/output_logs
+/error_logs
+/few_pytorch_env
+/__pycache__
+/init_env.sh
+/src/tools/__pycache__
+/training_data/__pycache__

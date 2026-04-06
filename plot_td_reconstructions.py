@@ -10,9 +10,9 @@ from few.utils.constants import YRSID_SI
 import matplotlib.pyplot as plt
 import os
 
-X_EMRIs_fname= "/fred/oz303/aboumerd/EMRI_denoising/Val_X_EMRIs_NORMALISED.npy"
-y_pred_EMRIs_fname= "/fred/oz303/aboumerd/EMRI_denoising/Val_y_pred_EMRIs.npy"
-y_true_EMRIs_fname= "/fred/oz303/aboumerd/EMRI_denoising/Val_y_true_EMRIs.npy"
+X_EMRIs_fname= "/fred/oz303/aboumerd/EMRI_denoising/experiments/TCN_with_transpose_convs/Val_X_EMRIs_NORMALISED.npy"
+y_pred_EMRIs_fname= "/fred/oz303/aboumerd/EMRI_denoising/experiments/TCN_with_transpose_convs/Val_y_pred_EMRIs.npy"
+y_true_EMRIs_fname= "/fred/oz303/aboumerd/EMRI_denoising/experiments/TCN_with_transpose_convs/Val_y_true_EMRIs.npy"
 
 #Load data
 X_EMRIs= np.load(X_EMRIs_fname, allow_pickle=True) 
@@ -47,8 +47,8 @@ for col in range(ncols):#subplot, axs.flatten()
   #If doing reconstructions across the A and E channels:
   for channel in range(nrows):
     # axs[channel,col].plot(t, X_EMRIs[col,channel,:], "b", label="Input", alpha=1)
-    axs[channel,col].plot(t, y_true_EMRIs[col,channel,:], "b", label="True EMRI", alpha=1)
-    axs[channel,col].plot(t, y_pred_EMRIs[col,channel,:], "r", label="Pred. EMRI", alpha=0.6)
+    # axs[channel,col].plot(t, y_true_EMRIs[col,channel,:], "b", label="True EMRI", alpha=1)
+    # axs[channel,col].plot(t, y_pred_EMRIs[col,channel,:], "r", label="Pred. EMRI", alpha=0.6)
     axs[channel,col].plot(t, residuals[col,channel,:], "g", label="Residual")
 
 # #And label the subplots
