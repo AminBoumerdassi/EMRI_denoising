@@ -70,7 +70,7 @@ g = torch.Generator()
 g.manual_seed(seed)
 
 # Initialise the model and move it to device
-model= ConvAE_2D().to(device)#Dilated_ConvAE().to(device)#ConvAE().to(device)
+model= Dilated_ConvAE().to(device)#ConvAE().to(device)
 
 # Make model in channels-last format for speedup
 model = model.to(memory_format=torch.channels_last)
@@ -199,15 +199,6 @@ training_target_SNR_range = [20, 80]
 validation_target_SNR_range = [20, 80]
 random_windows=False#True
 
-#pywavelet kwargs
-wavelet_transform = True#None
-'''NOTE: 500 by 500 doesn't capture the full timeseries but for memory constraints,
-we'll just have to settle on it rather than 1000 by 1000'''
-Nt = 512#500#256#None
-Nf = 512#500#256#None
-nx = 8.0#None
-mult = Nt//2#None
-
 #Setting training hyperparameters
 batch_size=32
 epochs=2000#200#100
@@ -229,11 +220,6 @@ training_set= EMRIGeneratorTDI(train_params,
                                target_SNR_range=training_target_SNR_range, 
                                use_gpu=use_cuda, 
                                random_windows=random_windows, 
-                               wavelet_transform=wavelet_transform, 
-                               Nt=Nt, 
-                               Nf=Nf, 
-                               nx=nx, 
-                               mult=mult, 
                                random_sign_flips=random_sign_flips)
 
 validation_set= EMRIGeneratorTDI(val_params, 
@@ -246,11 +232,6 @@ validation_set= EMRIGeneratorTDI(val_params,
                                 target_SNR_range=validation_target_SNR_range, 
                                 use_gpu=use_cuda, 
                                 random_windows=False, 
-                                wavelet_transform=wavelet_transform, 
-                                Nt=Nt, 
-                                Nf=Nf, 
-                                nx=nx, 
-                                mult=mult, 
                                 random_sign_flips=False)
 
 #Get current states so we can reset the val set at each epoch
@@ -299,7 +280,7 @@ validation_dataloader= torch.utils.data.DataLoader(validation_subset,
                                                    generator=val_g)
 
 #See the architecture of the model
-summary(model, input_size=(batch_size, n_channels, Nf, Nt))#(batch_size, n_channels, Nf, Nt)
+summary(model, input_size=(batch_size, n_channels, len_seq))#(batch_size, n_channels, Nf, Nt)
 
 #Declare generator's parameters
 training_set.declare_generator_params()
@@ -317,7 +298,7 @@ print("#################################")
 log_dir = "/fred/oz303/aboumerd/EMRI_denoising/runs_final/"
 logfolder = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 os.mkdir(log_dir+logfolder)
-comment='simple res_approach, heavy scaling'
+comment='conv-tasnet'
 filename_suffix='res_approach'
 writer = SummaryWriter(log_dir= log_dir+logfolder, 
                        filename_suffix=filename_suffix, 
@@ -342,130 +323,6 @@ mask_EMRIs = mask_EMRIs[:1,:,:,:].to(memory_format=torch.channels_last)
 mask_residual = mask_residual[:1,:,:,:].to(memory_format=torch.channels_last)
 residual = residual[:1,:,:,:].to(memory_format=torch.channels_last)
 
-##Calculate a mask
-#mask_transformed = torch.sign(mask_EMRIs) * torch.abs(mask_EMRIs)**(0.2)
-
-##Let's do a histogram of the mask values
-#plt.figure()
-#plt.imshow(np.abs(mask_EMRIs[0,0,:,:].detach().numpy()))
-#plt.imshow(torch.abs((mask_EMRI*X_EMRIs)[0,0,:,:]).detach().numpy(), cmap="inferno", origin="lower", vmin=0., vmax=1.0)
-#plt.colorbar()
-#plt.hist(mask_transformed.detach().numpy()[0,0].flatten(), bins=100, log=True)
-#plt.savefig("mask_hist.png")
-
-'''
-#Input has variance of ~114, min/max of [-32,32] ish
-#clean data has min/max of [-40, +40], weird distribution
-#target has min/max of around [-40, +40], weird distribution
-plt.figure()
-plt.hist(mask_EMRIs.cpu().numpy().flatten(), bins=100, log=True)
-plt.savefig("test_data.png")
-'''
-
-"""
-#Code to see the distribution of mask values
-plt.figure()
-while 1 !=0:
-    with torch.inference_mode():
-        '''IMPORTANT: Using mitigated glitch backgrounds for the val. data!!!!'''
-        validation_set.load_glitch_background(glitch_background_dir=glitch_background_dir,
-                                                                    background_idx=0)
-        X_EMRIs, y_true_EMRIs, residual, mask_EMRIs, mask_residual = next(iter(validation_dataloader))
-    #Plot
-    plt.hist(mask_EMRIs.cpu().numpy().flatten(), bins=100, log=True)
-    plt.savefig("mask_hist.png")
-"""
-
-
-'''
-mask = y_true_EMRIs / X_EMRIs
-mask_transformed = mask_EMRIs#torch.sign(mask) * torch.abs(mask)**(0.3)
-plt.figure()
-plt.hist(45.0* torch.abs(mask_EMRIs).cpu().numpy().flatten(), bins=100, log=True)
-plt.hist(mask_EMRIs.cpu().numpy().flatten(), bins=100, log=True)
-plt.hist(np.abs(y_true_EMRIs.cpu().numpy().flatten()), bins=100, log=True)
-# plt.xscale("log")
-plt.savefig("mask_hist.png")
-'''
-
-
-# '''To correctly calculate the "best fit":'''
-#bestfit= X_transformed - y_transformed#X_transformed - corruption_transformed
-
-# X_EMRIs = torch.asinh(X_EMRIs/1e-13)/max_abs_tensor
-# y_true_EMRIs = torch.asinh(y_true_EMRIs/1e-13)/max_abs_tensor
-
-
-# Convert target to np array for later calculations and plotting
-# y_true_EMRIs= y_true_EMRIs.detach().cpu().numpy()
-
-#validation_set.retune_glitches(1.0)#1e-9
-# validation_set.load_glitch_background(glitch_background_dir="/fred/oz303/aboumerd/EMRI_Glitches/data_files/glitch_bg_AET/max_glitch_SNR_8.0/",
-#                                                             background_idx=0)
-
-
-'''
-#Plot of example val data
-plt.figure()
-time_grid, freq_grid = compute_bins(Nf, Nt, T*365*86400)
-plt.title("Input validation data: Glitchy EMRI")
-plt.xlabel("Time, days")
-plt.ylabel("Freq, Hz")
-plt.imshow(np.abs(X_EMRIs[0,0,:,:].cpu().numpy()),#X_EMRIs#y_true_EMRIs
-                    cmap="inferno", origin="lower",
-                    interpolation="nearest",
-                    extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
-                    aspect="auto",
-                    # vmax=1.0,
-                    # vmin=0.0
-                    # norm="log",
-                    )
-# plt.yscale("log")
-plt.colorbar(label="Rescaled strain")
-plt.savefig("val_EMRI_tf.png")
-'''
-
-'''
-Example loss calculation
-for i in range(0,5):
-    max_abs_tensor= 30.0#for arcsinh transform
-    X_EMRIs, y_true_EMRIs = next(iter(validation_dataloader))
-    X_EMRIs = torch.asinh(X_EMRIs/1e-13)/max_abs_tensor
-    y_pred_EMRIs= model(X_EMRIs)#.to(torch.float32)
-    loss_fn(y_true_EMRIs, X_EMRIs)#.to(torch.float32), .to(torch.float32)
-'''
-
-#Define a epoch-wise schedule for the glitch rescaling
-# glitch_scale_schedule = np.geomspace(1e-9, 1.0, num=100)
-
-# #Define a scheduler for the minimum SNR range
-# SNR_min=20.0
-# SNR_max=80.0
-# schedule_length=200
-# def min_SNR_scheduler(epoch, SNR_min=20.0, SNR_max=80.0, schedule_length=120):
-#     '''A cosine-based scheduler to smoothly increase the SNR range.'''
-#     if epoch > schedule_length:
-#         out = SNR_min
-#     else:
-#         out = float(SNR_max - 0.5*(SNR_max-SNR_min)*(1-np.cos(np.pi*epoch/schedule_length)))
-#     # #Make sure anything past the end of the schedule is set to the min SNR
-#     # out[schedule_length:] = SNR_min
-#     return out
-
-
-#Before training, compute the scalogram of the truth
-max_abs_tensor= 53.0
-asinh_scale= 1e23
-inverse = True
-#Truth is only a modulus from being plottable
-y_true_EMRIs = preprocess_signal(y_true_EMRIs, 
-                    asinh_scale=asinh_scale, 
-                    # asinh_shift=asinh_shift, 
-                    max_absolute=max_abs_tensor,
-                    inverse = inverse
-                    )
-y_true_EMRIs = y_true_EMRIs.float().cpu().numpy()
-y_true_EMRI_scalogram = np.abs(y_true_EMRIs)
 
 #Train the model
 for t in range(start_epoch, epochs):
@@ -568,67 +425,44 @@ for t in range(start_epoch, epochs):
     with torch.inference_mode():
         with torch.autocast(device_type=str(device), dtype=torch.bfloat16, enabled=use_amp):
             '''Not using ema model for testing'''
-            pred_masks, pred_signals = model(X_EMRIs)
-            # #Split the EMRI and residual mask predictions
-            # pred_EMRI_masks, _ = pred_masks.chunk(2, dim=1)
-            # #Split the EMRI and residual signal predictions
-            # pred_EMRI, _ = pred_signals.chunk(2, dim=1)
-            y_pred_EMRIs = pred_signals#pred_EMRI
+            pred_signals = model(X_EMRIs)
 
     #convert prediction to np array
     y_pred_EMRIs= y_pred_EMRIs.float().cpu().numpy()
-    #compute scalogram of prediction
-    y_pred_EMRI_scalogram = np.abs(y_pred_EMRIs)
-
-    #Plot the reconstruction and residual
-    if wavelet_transform:
-        reconstruction_fig, axs = plt.subplots(1,2, sharey=True, figsize=(10, 5),layout='constrained')
-        time_grid, freq_grid = compute_bins(Nf, Nt, T*365*86400)
-        vmin= min(np.min(y_pred_EMRI_scalogram), np.min(y_true_EMRI_scalogram))#0.
-        vmax= max(np.max(y_pred_EMRI_scalogram), np.max(y_true_EMRI_scalogram))#1.0
-        reconstruction_fig.suptitle("Val. data reconstruction in A chan. at epoch {:}".format(t+1))
-        axs[0].set_title("Masked data")
-        axs[1].set_title("Clean data")
-        axs[0].set_xlabel("Time, seconds")
-        axs[1].set_xlabel("Time, seconds")
-        axs[0].set_ylabel("Freq, Hz")
-        im1 = axs[0].imshow(y_pred_EMRI_scalogram[0,0,:,:],#[0,0,:,:]#X_transformed.detach().cpu().numpy() - np.arctanh(y_pred_EMRIs)
-                            cmap="inferno", 
-                            origin="lower",
-                            interpolation="nearest",
-                            extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
-                            vmin=vmin,
-                            vmax=vmax,
-                            aspect='auto',
-                            norm="log",
-                            )
-        im2 = axs[1].imshow(y_true_EMRI_scalogram[0,0,:,:],#[0,0,:,:]#y_pred_EMRIs#best_fit_transformed.detach().cpu().numpy()
-                            cmap="inferno", 
-                            origin="lower",
-                            interpolation="nearest",
-                            extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
-                            vmin=vmin,
-                            vmax=vmax,
-                            aspect='auto',
-                            norm="log",
-                            )
-        # plt.colorbar(im1, ax=axs[0], label="Rescaled strain")
-        plt.colorbar(im2, ax=axs[1], label="Absolute Wavelet Amplitude")#Rescaled strain
-        #reconstruction_fig.colorbar(im2, label="Rescaled strain", ax=axs.ravel().tolist())#, shrink=0.75
-        # reconstruction_fig.tight_layout()
-        # axs[0].set_box_aspect(1)
-        # axs[1].set_box_aspect(1)
-        #plt.savefig("test_val.png")
-    else:
-        reconstruction_fig = plt.figure()
-        #Time-domain reconstruction
-        # plt.title("Val. data reconstruction in A chan. at epoch {:}".format(t+1))
-        # plt.xlabel("Time, years")
-        # plt.ylabel("Strain")
-        # plt.plot(np.linspace(0, T, num=len_seq)[:150000], y_true_EMRIs[0,0,:150000], label="Target")
-        # plt.plot(np.linspace(0, T, num=len_seq)[:150000], y_pred_EMRIs[0,0,:150000], label="Prediction")
-        # plt.plot(np.linspace(0, T, num=len_seq)[:150000], residual[0,0,:150000], label="residual")
-        # plt.legend(loc='upper right')
+    #compute wavelet transform or stft of prediction 
+    y_pred_EMRIs_wavelet = None#np.abs(y_pred_EMRIs)
+    #Plot the reconstruction in the wavelet or stft domain
+    reconstruction_fig, axs = plt.subplots(1,2, sharey=True, figsize=(10, 5),layout='constrained')
+    reconstruction_fig.suptitle("Val. data reconstruction in A chan. at epoch {:}".format(t+1))
+    axs[0].set_title("Masked data")
+    axs[1].set_title("Clean data")
+    axs[0].set_xlabel("Time, seconds")
+    axs[1].set_xlabel("Time, seconds")
+    axs[0].set_ylabel("Freq, Hz")
+    # time_grid, freq_grid = compute_bins(Nf, Nt, T*365*86400)
+    # vmin= min(np.min(y_pred_EMRI_scalogram), np.min(y_true_EMRI_scalogram))#0.
+    # vmax= max(np.max(y_pred_EMRI_scalogram), np.max(y_true_EMRI_scalogram))#1.0
+    # im1 = axs[0].imshow(y_pred_EMRI_scalogram[0,0,:,:],#[0,0,:,:]#X_transformed.detach().cpu().numpy() - np.arctanh(y_pred_EMRIs)
+    #                     cmap="inferno", 
+    #                     origin="lower",
+    #                     interpolation="nearest",
+    #                     extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
+    #                     vmin=vmin,
+    #                     vmax=vmax,
+    #                     aspect='auto',
+    #                     norm="log",
+    #                     )
+    # im2 = axs[1].imshow(y_true_EMRI_scalogram[0,0,:,:],#[0,0,:,:]#y_pred_EMRIs#best_fit_transformed.detach().cpu().numpy()
+    #                     cmap="inferno", 
+    #                     origin="lower",
+    #                     interpolation="nearest",
+    #                     extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
+    #                     vmin=vmin,
+    #                     vmax=vmax,
+    #                     aspect='auto',
+    #                     norm="log",
+    #                     )
+    #plt.colorbar(im2, ax=axs[1], label="Absolute Wavelet Amplitude")
     #Save and close fig
     plt.savefig("reconstructions_td_live_epoch_{:}.png".format(t+1), bbox_inches="tight")#
     plt.close()
@@ -650,14 +484,3 @@ for t in range(start_epoch, epochs):
 writer.flush()
 writer.close()
 print("Done!")
-
-
-#Save the training and val losses
-'''EDIT THESE FILE NAMES!'''
-# np.save("train_history.npy",train_history)
-# np.save("val_history.npy", val_history)
-
-#Save model
-'''EDIT AS NEEDED!'''
-#torch.save(model.state_dict(), "model_BS_{:}_lr_0_{:}.pt".format(batch_size, str(lr)[2:]))
-#torch.save(model.state_dict(), "model_current.pt")

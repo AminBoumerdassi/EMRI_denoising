@@ -70,12 +70,13 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
                  add_glitches=False, 
                  use_gpu = True, 
                  random_windows=False, 
-                 wavelet_transform=False,
+                #  wavelet_transform=False,
                  random_sign_flips=False, 
-                 Nt=None, 
-                 Nf=None, 
-                 nx=None, 
-                 mult=None):
+                #  Nt=None, 
+                #  Nf=None, 
+                #  nx=None, 
+                #  mult=None,
+                 ):
         'Initialization'
         self.EMRI_params_and_SNRs= copy.copy(EMRI_params_and_SNRs)#shape: (no. EMRIs, no. parameters + SNR)
         self.EMRI_params_set_size= self.EMRI_params_and_SNRs.shape[0]
@@ -97,11 +98,11 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         #For data augmentation
         self.random_sign_flips = random_sign_flips
         #Pywavelet kwargs
-        self.wavelet_transform=wavelet_transform
-        self.Nt=Nt
-        self.Nf=Nf
-        self.nx=nx
-        self.mult=mult
+        # self.wavelet_transform=wavelet_transform
+        # self.Nt=Nt
+        # self.Nf=Nf
+        # self.nx=nx
+        # self.mult=mult
         #Gpu check
         if self.use_gpu == True:
             self.xp = cp
@@ -137,14 +138,14 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
                                                   amplitude_kwargs=amplitude_kwargs
                                                   )
         #Initialise the backend for pywavelet
-        if wavelet_transform:
-            pywavelet.set_backend("cupy", "float64") if use_gpu else pywavelet.set_backend("numpy", "float64")
-            #Initialise the timeseries objects for X and y
-            self.X_timeseries = pywavelet.types.TimeSeries(self.xp.zeros(dim), self.xp.arange(0, self.dim*self.dt, dt))
-            self.y_timeseries = pywavelet.types.TimeSeries(self.xp.zeros(dim), self.xp.arange(0, self.dim*self.dt, dt))
-            #Initialise an empty array for the wavelet transforms
-            self.X_tf= self.xp.zeros((len(TDI_channels), self.Nf, self.Nt))
-            self.y_tf= self.xp.zeros((len(TDI_channels), self.Nf, self.Nt))
+        # if wavelet_transform:
+        #     pywavelet.set_backend("cupy", "float64") if use_gpu else pywavelet.set_backend("numpy", "float64")
+        #     #Initialise the timeseries objects for X and y
+        #     self.X_timeseries = pywavelet.types.TimeSeries(self.xp.zeros(dim), self.xp.arange(0, self.dim*self.dt, dt))
+        #     self.y_timeseries = pywavelet.types.TimeSeries(self.xp.zeros(dim), self.xp.arange(0, self.dim*self.dt, dt))
+        #     #Initialise an empty array for the wavelet transforms
+        #     self.X_tf= self.xp.zeros((len(TDI_channels), self.Nf, self.Nt))
+        #     self.y_tf= self.xp.zeros((len(TDI_channels), self.Nf, self.Nt))
         #Set the time window to 2 years if we want randomised windows of EMRIs
         if self.random_windows:
             self.T= 2.0
@@ -195,12 +196,12 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         return self.EMRI_params_set_size
     def __getitem__(self, index):
         'Generates one sample of data'
-        X, y, residual, mask_X, mask_residual = self.data_generation(index)
+        X, y = self.data_generation(index)
         #Do a batch-wise noise-gen
         #Do a batch-wise summation of waveform and noise
         #Do a batch-wise noise-whitening
         #Do a batch-wise conversion of xp arr to torch tensor
-        return X, y, residual, mask_X, mask_residual
+        return X, y
     def data_generation(self, index):
         'Generate a single noise-whitened TDI EMRI.'
         #Choose a random start point in the window if needed
@@ -242,78 +243,19 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
                               self.PSD_AE, 
                               window=window
                               )
-        #Convert to time-freq domain if desired
-        if self.wavelet_transform:
-            '''Annoyingly, pywavelet doesn't do multichannel transforms. So we have to transform
-            each channel separately.'''
-            for chan in range(len(self.TDI_channels)):
-                self.X_timeseries.data = X_t[chan]
-                self.y_timeseries.data = y_t[chan]
-                #Transform the timeseries to t-f
-                #Note that the transforms produce real output that can be +ve or -ve and vary across orders of magnitude
-                self.X_tf[chan] = pywavelet.transforms.from_time_to_wavelet(self.X_timeseries, 
-                                                                            Nf=self.Nf, 
-                                                                            Nt=self.Nt, 
-                                                                            nx=self.nx, 
-                                                                            mult=self.mult).data#self.X_timeseries.to_wavelet(Nf=self.Nf, Nt=self.Nt).data
-                self.y_tf[chan] = pywavelet.transforms.from_time_to_wavelet(self.y_timeseries, 
-                                                                            Nf=self.Nf, 
-                                                                            Nt=self.Nt, 
-                                                                            nx=self.nx, 
-                                                                            mult=self.mult).data#self.y_timeseries.to_wavelet(Nf=self.Nf, Nt=self.Nt).data
-            #Plug into X and y
-            X= self.X_tf
-            y= self.y_tf
-        else:
-            X= X_t
-            y= y_t
-        #Calculate the residual
-        residual = X - y
-        #Calculate the complex mask of the target and residual
-        '''Add a small epsilon term for stability'''
-        eps=1e-14
-        mask_X = y/(X)#+eps
-        mask_residual = residual/(X)#+eps
+        X= X_t
+        y= y_t
         #Preprocess X y and residual
         max_abs_tensor= 53.0#106.0#
-        '''Changing the asinh scaling to a very large number'''
-        asinh_scale= 1e23#1e46#
-        asinh_shift = 0.0
         inverse = False
         X = preprocess_signal(X, 
-                              asinh_scale=asinh_scale, 
-                            #   asinh_shift=asinh_shift, 
                               max_absolute=max_abs_tensor,
                               inverse = inverse
                               )
         y = preprocess_signal(y, 
-                              asinh_scale=asinh_scale, 
-                            #   asinh_shift=asinh_shift, 
                               max_absolute=max_abs_tensor,
                               inverse = inverse
                               )
-        residual = preprocess_signal(residual, 
-                                     asinh_scale=asinh_scale, 
-                                    #  asinh_shift=asinh_shift, 
-                                     max_absolute=max_abs_tensor,
-                                     inverse = inverse
-                                     )
-        #Preprocess the complex masks
-        max_abs= 80.0#45.0
-        '''Changing the asinh scaling to a very large number'''
-        scaling_factor=1e28#1e14
-        mask_X = preprocess_mask(mask_X, 
-                                 max_abs=max_abs,
-                                 scaling_factor=scaling_factor,
-                                #  power_factor=power_factor, 
-                                 inverse=inverse
-                                 )
-        mask_residual = preprocess_mask(mask_residual, 
-                                        max_abs=max_abs,
-                                        scaling_factor=scaling_factor,
-                                #  power_factor=power_factor, 
-                                 inverse=inverse
-                                 )
         #Convert data to float32 precision if needed
         copy=False
         X= X.astype(self.xp.float32, 
@@ -322,22 +264,10 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         y= y.astype(self.xp.float32, 
                     copy=copy
                     )#float32
-        residual= residual.astype(self.xp.float32, 
-                                  copy=copy
-                                  )#float32
-        mask_X= mask_X.astype(self.xp.float32, 
-                              copy=copy
-                              )
-        mask_residual = mask_residual.astype(self.xp.float32, 
-                                             copy=copy
-                                             )
         #Convert X and y from xp arrays to PyTorch tensors
         X= torch.from_dlpack(X)
         y= torch.from_dlpack(y)
-        residual= torch.from_dlpack(residual)
-        mask_X = torch.from_dlpack(mask_X)
-        mask_residual = torch.from_dlpack(mask_residual)
-        return X, y, residual, mask_X, mask_residual
+        return X, y
     def declare_generator_params(self):
         #Declare generator parameters
         print("#################################")

@@ -54,41 +54,15 @@ def power_law_compression(input, power_factor=0.3, forward=True):
         out = xp.sign(input) * xp.abs(input)**(1/power_factor)
     return out
 
-def preprocess_signal(input, asinh_scale=1 / 1e-13, asinh_shift=0.0, max_absolute=None, inverse=False):
+def preprocess_signal(input, max_absolute=None, inverse=False):
     '''
-    Preprocesses input signals by first doing an asinh transform
-    and scaling by the maximum absolute.
+    Preprocesses input signals by scaling by the maximum absolute.
     max_abs_tensor= self.xp.array([30.990543, 30.842495])[:,None,None]
     '''
     if inverse == False:
         #Preprocess forwards
-        if max_absolute is None:
-            out = asinh_transform(input, a=asinh_scale, c=asinh_shift, forward=True)#signed_log_transform(input, forward=True)#
-        else:
-            out = asinh_transform(input, a=asinh_scale, c=asinh_shift, forward=True)#signed_log_transform(input, forward=True)#
-            out = normalise(out, scale_factor=max_absolute, forward=True)
+        out = normalise(out, scale_factor=max_absolute, forward=True)
     else:
         #Preprocess backwards
-        if max_absolute is None:
-            out = asinh_transform(input, a=asinh_scale, c=asinh_shift, forward=False)#signed_log_transform(input, forward=False)#
-        else:
-            out = normalise(input, scale_factor=max_absolute, forward=False)
-            out = asinh_transform(out, a=asinh_scale, c=asinh_shift, forward=False)#signed_log_transform(out, forward=False)#       
-    return out
-
-def preprocess_mask(input, power_factor=0.3, max_abs=None, scaling_factor=1.0, inverse=False):
-    '''
-    Preprocesses target masks by a reversible power law compression
-    '''
-    forward = False if inverse else True
-    if inverse:
-        out = normalise(input, scale_factor=max_abs, forward=forward)
-        out = asinh_transform(out, a=scaling_factor, forward=forward)#signed_log_transform(out, forward=forward)#power_law_compression(input, power_factor=power_factor, forward=forward)
-    else:
-        out = asinh_transform(input, a=scaling_factor, forward=forward)#signed_log_transform(input, forward=forward)
-        out = normalise(out, scale_factor=max_abs, forward=forward)
-    # if inverse != False:
-    #     out = power_law_compression(input, power_factor=power_factor, forward=True)
-    # else:
-    #     out = power_law_compression(input, power_factor=power_factor, forward=False)
+        out = normalise(input, scale_factor=max_absolute, forward=False)
     return out
