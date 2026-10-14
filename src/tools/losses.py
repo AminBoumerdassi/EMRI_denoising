@@ -1,24 +1,113 @@
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
+
+def charbonnier_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6):
+    '''Returns charbonnier loss between prediction and target without any reduction.'''
+    return torch.sqrt(torch.pow((pred - target), 2) + eps)# - eps
+
 
 #From LapSRN-PyTorch github repo
 class CharbonnierLoss(nn.Module):
     def __init__(self, eps: float = 1e-6) -> None:
         super(CharbonnierLoss, self).__init__()
         self.eps = eps
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, region_weighting = None, sample_weighting = None) -> torch.Tensor:
-        loss = torch.sqrt(torch.pow((pred - target), 2) + self.eps)
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, region_weighting = None, sample_weighting = None, normalise=False) -> torch.Tensor:
+        #Compute unreduced and unweighted loss
+        loss = charbonnier_loss(pred, target, eps= self.eps)#torch.sqrt(torch.pow((pred - target), 2) + self.eps)
         if region_weighting is not None:
             loss = region_weighting * loss
         if sample_weighting is not None:
             loss = sample_weighting * loss
         loss = torch.mean(loss)
+        if normalise:
+            norm = torch.mean(torch.sqrt(torch.pow((target), 2) + self.eps))
+            loss = loss / (norm + self.eps)#torch.std(torch.abs(target))#(torch.mean(torch.abs(target)) + self.eps)
         # '''Here, we are reducing by summing rather than averaging!!!'''
         # loss = torch.sum(torch.sqrt(torch.pow((pred - target), 2) + self.eps), dim=(-1,-2,-3))
         # loss = loss.mean()
         return loss
 
+#Adapted from LapSRN-PyTorch github repo
+class SubBandCharbonnierLoss(nn.Module):
+    def __init__(self, eps: float = 1e-6) -> None:
+        super(SubBandCharbonnierLoss, self).__init__()
+        self.eps = eps
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, region_weighting = None, sample_weighting = None, normalise=False) -> torch.Tensor:
+        loss = charbonnier_loss(pred, target, eps= self.eps)#torch.sqrt(torch.pow((pred - target), 2) + self.eps)
+        if region_weighting is not None:
+            loss = region_weighting * loss
+        if sample_weighting is not None:
+            loss = sample_weighting * loss
+        '''#Reduce by summation across all channels except batch
+        loss = torch.sum(loss, dim=(1, 2, 3))
+        #Reduce by averaging across batches
+        loss = torch.mean(loss)'''
+        #Reduce over time and channel axes
+        loss = torch.mean(loss, (1,3))
+        #Then average over all frequency bins
+        loss = torch.mean(loss)#torch.sum(loss)#torch.mean(loss)#torch.sum(loss)
+        if normalise:
+            norm = torch.mean(torch.sqrt(torch.pow((target), 2) + self.eps))
+            loss = loss / (norm + self.eps)#torch.std(torch.abs(target))#(torch.mean(torch.abs(target)) + self.eps)
+        # '''Here, we are reducing by summing rather than averaging!!!'''
+        # loss = torch.sum(torch.sqrt(torch.pow((pred - target), 2) + self.eps), dim=(-1,-2,-3))
+        # loss = loss.mean()
+        return loss
+
+
+class LogMagnitudeL1Loss(nn.Module):
+    def __init__(self, epsilon=1e-8):
+        super(LogMagnitudeL1Loss, self).__init__()
+        self.epsilon = epsilon
+
+    def forward(self, x_mag, y_mag, region_weighting = None):
+        """
+        Computes the L1 distance between log-magnitudes of predictions and targets.
+        
+        Args:
+            x_mag (torch.Tensor): Predicted magnitude spectrogram.
+            y_mag (torch.Tensor): Target magnitude spectrogram.
+            
+        Returns:
+            torch.Tensor: The mean log-magnitude L1 loss.
+        """
+        #Cast objects to float64 precision
+        input_64 = x_mag.double()
+        target_64 = y_mag.double()
+        #Calculate each scaled modulus
+        abs_input = torch.abs(input_64)#input, self.scale_factor*
+        abs_target = torch.abs(target_64)#target, self.scale_factor*
+        #Calculate logs separately to avoid product underflow (input * target)
+        # log|input * target| = log|input| + log|target|
+        # log|target * target| = 2 * log|target|
+        log_y = torch.log(abs_target.clamp(min=self.epsilon))#, min=1.0
+        log_x = torch.log(abs_input.clamp(min=self.epsilon))#, min=1.0
+
+        # Add epsilon to prevent log(0) and stabilize the gradient
+        # log_x = torch.log(x_mag + self.epsilon)
+        # log_y = torch.log(y_mag + self.epsilon)
+        
+        # Calculate the L1 loss on the log-magnitudes
+        '''We could try switching this to Charbonnier loss.'''
+        loss = charbonnier_loss(log_x, log_y, eps = 1e-6)
+        
+        if region_weighting is not None:
+            loss = region_weighting * loss
+
+        loss = torch.mean(loss)
+
+        #loss = F.l1_loss(log_x, log_y, weight = region_weighting)#, reduction='none'
+
+        # #Reduce by summation over all axes except batch size
+        # loss = torch.sum(loss, (1,2,3))
+
+        # #Reduce by averaging over batch size
+        # loss = torch.mean(loss)
+        
+        #Cast to float32 precision
+        return loss.float()
 
 class OverlapLoss(torch.nn.Module):
     """
@@ -27,21 +116,36 @@ class OverlapLoss(torch.nn.Module):
     because you can have anticorrelated signals producing negative overlaps.
     """
 
-    def __init__(self, eps=1e-8):#,  reduction="mean"
+    def __init__(self, eps=1e-4):#,  reduction="mean"
         super(OverlapLoss, self).__init__()
         self.eps = eps
         # self.reduction = reduction
 
-    def forward(self, input, target):
-        input_dot_target = torch.nansum(input*target, dim=(-2,-1))
-        target_dot_target = torch.nansum(target*target, dim=(-2,-1))
-        target_dot_input = torch.nansum(input*input, dim=(-2,-1))
-        match = input_dot_target * torch.rsqrt(target_dot_target * target_dot_input + self.eps) #/ ( * ) )**0.5#
-        #log the mismatch for easier optimisation
-        #log_match = torch.log((1 - match)**2 + 1 + self.eps)
-        log_match = 1 - match#(1 - match)**2#-torch.log(1 - torch.abs(match)**2)
-        losses = log_match.mean()#apply_reduction(losses, self.reduction)
-        return losses
+    def forward(self, input, target, region_weighting = None):
+        '''BIG NOTE: we are doing some of this in float64 precision instead!!!!'''
+        #Cast objects to float64 precision
+        input_64 = input.double()
+        target_64 = target.double()
+        if region_weighting is None:
+            weights = 1.0
+        else:
+            # Match the weighting tensor precision to float64 as well
+            weights = region_weighting.double()
+                
+        input_dot_target = torch.nansum(weights*input_64*target_64, dim=(-2,-1))#input*target
+        target_dot_target = torch.nansum(weights*target_64*target_64, dim=(-2,-1))#target*target
+        input_dot_input = torch.nansum(weights*input_64*input_64, dim=(-2,-1))#input*input
+        #Calculate denominator terms individually
+        input_norm  = torch.sqrt(input_dot_input + self.eps)#torch.sqrt(torch.clamp(input_dot_input, min=self.eps))
+        target_norm = torch.sqrt(target_dot_target + self.eps)#torch.sqrt(torch.clamp(target_dot_target, min=self.eps))
+        #Calculate the match
+        match = input_dot_target / (input_norm * target_norm)#input_dot_target * torch.rsqrt(target_dot_target * input_dot_input + self.eps)
+        #Clamp match in case of rounding errors
+        match = torch.clamp(match, -1.0, 1.0)
+        losses = 1 - match#(1 - match)**2#
+        losses = torch.mean(losses)
+        #Finally, cast the loss back to float32 precision
+        return losses.float()
     
 class DetSNRLoss(torch.nn.Module):
     """
@@ -59,6 +163,70 @@ class DetSNRLoss(torch.nn.Module):
         det_SNR = torch.nansum((input * target), dim=(-2,-1)) / (opt_SNR + self.eps)
         losses = torch.mean(torch.sqrt(torch.pow(det_SNR - opt_SNR, 2) + self.eps))
         return losses
+
+class CrossWaveletPowerLoss(torch.nn.Module):
+    """
+    XWT power as a loss function.
+    Charbonnier loss between the log|w_xy| and log|w_yy|
+    eps: a floor on the log|w_xy|
+    """
+
+    def __init__(self, scale_factor=1.0, eps=1e-8):#,  reduction="mean"
+        super(CrossWaveletPowerLoss, self).__init__()
+        self.eps = eps
+        self.scale_factor = scale_factor
+        # self.reduction = reduction
+
+    def forward(self, input, target):
+        '''The below logs can go to -inf if epsilon is too small.
+        Need to be careful (potentially adaptive) with the choice of eps'''
+        '''We can also try clamping with an epsilon instead of adding.'''
+        #Cast objects to float64 precision
+        input_64 = input.double()
+        target_64 = target.double()
+        #Calculate each scaled modulus
+        abs_input = torch.abs(input_64)#input, self.scale_factor*
+        abs_target = torch.abs(target_64)#target, self.scale_factor*
+        #Calculate logs separately to avoid product underflow (input * target)
+        # log|input * target| = log|input| + log|target|
+        # log|target * target| = 2 * log|target|
+        log_abs_target = torch.log(abs_target.clamp(min=self.eps))#, min=1.0
+        log_abs_input = torch.log(abs_input.clamp(min=self.eps))#, min=1.0
+        log_XWT_power_yy = 2.0 * log_abs_target
+        log_XWT_power_xy = log_abs_input + log_abs_target
+        # log_XWT_power_yy = torch.log(torch.abs(target * target) + self.eps)
+        # log_XWT_power_xy = torch.log(torch.abs(input * target) + self.eps)
+        #Compute Charbonnier loss between each XWT power
+        '''Different epsilon for the charbonnier loss since we're already comparing logged values at that point'''
+        charbonnier_eps = 1e-6
+        '''The below can produce nans if the logs have gone to -inf.
+        Not a problem with the loss between the input and targets.'''
+        XWT_diff = charbonnier_loss(log_XWT_power_xy, log_XWT_power_yy, eps = charbonnier_eps)#torch.sqrt(torch.pow(torch.log(XWT_power_yy + self.eps) - torch.log(XWT_power_xy + self.eps), 2) + self.eps)
+        #Reduction by averaging
+        '''Averaging losses that contain NaNs will obviously produce a nan, hence
+        a final loss of Nan. So maybe try nanmean'''
+        losses = torch.mean(XWT_diff)
+        #Finally, cast to float32 precision
+        return losses.float()
+
+
+class OptSNRLoss(torch.nn.Module):
+    """
+    Optimal SNR as a loss function.
+    Inner product of the difference between prediction and target.
+    """
+
+    def __init__(self, eps=1e-8):#,  reduction="mean"
+        super(OptSNRLoss, self).__init__()
+        self.eps = eps
+        # self.reduction = reduction
+
+    def forward(self, input, target):
+        residual = target - input
+        inn_prod = torch.nansum(residual*residual, dim=(-2,-1))
+        losses = torch.mean(inn_prod)
+        return losses
+
 
 class CorrelationLoss(torch.nn.Module):
     """
@@ -93,19 +261,26 @@ class CorrelationLoss(torch.nn.Module):
 
 #Borrowed from https://github.com/mmany/pytorch-GDL/blob/main/custom_loss_functions.py
 class GradientDifferenceLoss(nn.Module):
-    def __init__(self, weight=None, size_average=True, alpha=1.0):
+    '''Configured for data that is to be logged and modulus'd'''
+    def __init__(self, weight=None, size_average=True, alpha=1.0, eps=1e-4):
         super(GradientDifferenceLoss, self).__init__()
         self.alpha = alpha
+        self.eps = eps
 
     def forward(self, inputs, targets):
-
+        #Convert input to float64
+        input_64 = inputs.double()
+        target_64 = targets.double()
+        #Log and modulus to eliminate extreme variance and negative values
+        input_64 = torch.log(input_64.abs().clamp(min=self.eps))
+        target_64 = torch.log(target_64.abs().clamp(min=self.eps))
         # gradient_diff = (inputs.diff(dim=-2, prepend=torch.tensor(0.0))-targets.diff(dim=-2, prepend=torch.tensor(0.0))).pow(2) + (inputs.diff(dim=-1, prepend=torch.tensor(0.0))-targets.diff(dim=-1, prepend=torch.tensor(0.0))).pow(2)
-        term_1 = torch.diff(inputs, dim=-2).abs() - torch.diff(targets, dim=-2).abs() #(inputs.diff(dim=-2)-targets.diff(dim=-2)).pow(2)
-        term_2 = torch.diff(inputs, dim=-1).abs() - torch.diff(targets, dim=-1).abs()  #(inputs.diff(dim=-1)-targets.diff(dim=-1)).pow(2)
+        term_1 = torch.diff(input_64, dim=-2).abs() - torch.diff(target_64, dim=-2).abs() #(inputs.diff(dim=-2)-targets.diff(dim=-2)).pow(2)
+        term_2 = torch.diff(input_64, dim=-1).abs() - torch.diff(target_64, dim=-1).abs()  #(inputs.diff(dim=-1)-targets.diff(dim=-1)).pow(2)
         gradient_diff = torch.abs(term_1[:,:,:,:-1])**self.alpha + torch.abs(term_2[:,:,:-1,:])**self.alpha #term_1[:,:,:,:-1] + term_2[:,:,:-1,:]
         loss_gdl = torch.mean(gradient_diff)#gradient_diff.sum()/inputs.numel()#Maybe should be averaged just over batch size?
-
-        return loss_gdl
+        #Finally cast back to float32 precision
+        return loss_gdl.float()
 
 # import math
 # import torch

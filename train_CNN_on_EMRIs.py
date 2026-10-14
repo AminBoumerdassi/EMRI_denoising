@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchinfo import summary
+from ema_pytorch import EMA
+from autoclip.torch import QuantileClip
 
 #sklearn imports
 from sklearn.model_selection import train_test_split
@@ -23,6 +25,7 @@ from few.utils.constants import YRSID_SI
 import os
 import copy
 import random
+import datetime
 
 #pywavelet imports
 import pywavelet
@@ -51,9 +54,6 @@ from src.tools.transforms import *
 torch.autograd.set_detect_anomaly(False)
 
 # Using mixed precision
-'''Keeping mixed precision off for now as it seems to worsen performance.
-   It needs a bit of finesse, and deeper reading into how best to apply
-   it for this ML problem.'''
 use_amp=True#False
 scaler = torch.amp.GradScaler(device, enabled=use_amp)
 
@@ -73,39 +73,54 @@ g.manual_seed(seed)
 model= ConvAE_2D().to(device)#Dilated_ConvAE().to(device)#ConvAE().to(device)
 
 # Make model in channels-last format for speedup
-'''Just remember to convert input as well'''
 model = model.to(memory_format=torch.channels_last)
 
 #Trick: compile the model
 model = torch.compile(model)
 
+#Wrap model into EMA object. Use the Switch-EMA variant.
+ema = EMA(
+    model,
+    beta = 0.999,#0.9999,              # exponential moving average factor
+    update_after_step = 5000,#100,    # only after this number of .update() calls will it start updating
+    update_every = 1,#10,          # how often to actually update, to save on compute (updates every 10th .update() call)
+)
+
+#Ensure that only weights are being decayed
+decay = []
+no_decay = []
+
+for name, param in model.named_parameters():
+
+    if not param.requires_grad:
+        continue
+
+    # Exclude biases and 1D params
+    if param.ndim == 1 or name.endswith(".bias") or "alpha" in name:
+        no_decay.append(param)
+    else:
+        decay.append(param)
+
+#Initialise autoclip object
+clipper = QuantileClip(model.parameters(), quantile=0.9, history_length=100)#quantile=0.9,history_length=1000
+
 # Initialise loss function and optimizer
-'''About learning rates:
-For the timeseries EMRIs, keeping the lr to 14e-4.
-This may be too large for the time-frequency data.
-This could explain the bounce in loss. The lr is so high, that the weight updates
-become large enough to miss or effectively orbit around the minimum.
-
-Can try lr=14e-5, 14e-6, ... etc.
-
-Decreasing the lr helped significantly but it may still be too high as the loss increases midway through the 1st epoch.
-
-Now try 1e-4, and potentially lower. Want to completely eliminate the brief increase in loss.
-'''
-
-lr=5e-4#1e-4#1e-4#1e-5#1e-4#1e-5#14e-4##benchmark at 14e-4
-'''Change of loss function: mae loss as it seems to do better at image denoising.'''
-loss_fn= CharbonnierLoss().to(device)#nn.L1Loss().to(device)#nn.MSELoss().to(device)#CharbonnierLoss().to(device)#
-'''Change of optimiser: from Adam to RAdam'''
-optimizer= torch.optim.RAdam(params=model.parameters(), lr=lr)#torch.optim.Adam(params=model.parameters(), lr=lr)
+lr=3e-3#5e-3#5e-4#1e-4#1e-4#1e-5#1e-4#1e-5#14e-4##benchmark at 14e-4
+weight_decay = 0.0#1e-5
+loss_fn= SubBandCharbonnierLoss().to(device)#nn.L1Loss().to(device)#nn.MSELoss().to(device)#CharbonnierLoss().to(device)#
+optimizer= torch.optim.RAdam(params=[
+                            {"params": decay, "weight_decay": weight_decay},
+                            {"params": no_decay, "weight_decay": 0.0},
+                            ], 
+                             lr=lr,
+                             decoupled_weight_decay=True)#torch.optim.Adam(params=model.parameters(), lr=lr)
 
 #Defining Lr scheduler
-'''Change of LR scheduler to reduce lr on plateau'''
-scheduler = None#torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=25)#torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=2000)#1000
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=5000, eta_min=1e-5)#1000#torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=25)#
 
 #Doing pretraining? Set here
-pretrained=True
-pretraining_weights = "/fred/oz303/aboumerd/EMRI_denoising/pretraining/model_checkpoint.tar"
+pretrained=False#True
+pretraining_weights = "/fred/oz303/aboumerd/EMRI_denoising/trained_nearly_model_with_CBAM_and_ASPP/model_checkpoint.tar"
 if pretrained:
     print("Using pretrained weights!")
     checkpoint = torch.load(pretraining_weights, map_location=device, weights_only=False)
@@ -115,7 +130,7 @@ else:
     print("Not using pretrained weights!")
 
 # Continuing training? Set here!!!!!!!!
-checkpoint_path = None#"model_checkpoint.tar"#None#"model_checkpoint.tar"#None#"model_checkpoint.tar"#None#"model_checkpoint.tar"#None#"model_checkpoint.tar"#
+checkpoint_path = None#"model_checkpoint.tar"#"/fred/oz303/aboumerd/EMRI_denoising/trained_nearly_model_with_CBAM_and_ASPP/model_checkpoint.tar"#"model_checkpoint.tar"#None#"model_checkpoint.tar"#None#"model_checkpoint.tar"#None#"model_checkpoint.tar"#None#"model_checkpoint.tar"#
 
 if checkpoint_path is not None:
     print("Continuing training!")
@@ -126,17 +141,27 @@ if checkpoint_path is not None:
     #Load optimiser state
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     #Load scheduler state
-    # scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    '''NOTE: In previous jobs, the scheduler was mis-stepping according to the val loss rather than the epoch.
+    So scheduler.last_epoch may need to be manually edited beforehand to fix this!'''
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    #Load scaler state
+    scaler.load_state_dict(checkpoint['scaler_state_dict'])
     start_epoch = checkpoint['epoch'] + 1
     #Set the most recent losses
     train_history=[]
     val_history=[checkpoint['loss']]
+    #Set the most recent metrics
+    train_pred_overlap_history=[]
+    val_pred_overlap_history=[checkpoint['pred_overlap_history']]
+    val_pred_overlap_history_EMA=[checkpoint['pred_overlap_history_EMA']]
+    input_overlap_history=[checkpoint['input_overlap_history']]
+    train_residual_overlap_history=[]
     #Set model to train mode
     model.train()
     #Get previous random states
     torch.set_rng_state(checkpoint["torch_rng_state"].to("cpu")),
-    torch.cuda.set_rng_state_all([checkpoint["cuda_rng_state"][0].to("cpu")]),
-    np.random.set_state(checkpoint["numpy_rng_state"]),
+    torch.cuda.set_rng_state_all([checkpoint["cuda_rng_state"][0].to("cpu")])
+    np.random.set_state(checkpoint["numpy_rng_state"])
     random.setstate(checkpoint["python_rng_state"])
     g.set_state(checkpoint["generator_rng_state"].to("cpu"))
 else:
@@ -145,6 +170,16 @@ else:
     #initialise training and validation histories
     train_history=[]
     val_history=[]
+    val_history_EMA=[]
+    #Initialise metric histories
+    train_pred_overlap_history=[]
+    val_pred_overlap_history=[]
+    val_pred_overlap_history_EMA=[]
+    input_overlap_history=[]
+    train_residual_overlap_history=[]
+    val_residual_overlap_history=[]
+    val_residual_overlap_history_EMA=[]
+
 
 #Setting generator parameters
 len_seq= 2**20#23#2**22 gives around 1.3 years, 2**23 around 2.6 years
@@ -155,8 +190,9 @@ TDI_channels="AE"
 n_channels=len(TDI_channels)
 
 '''No noise or glitches because of we are pretraining! Change later!'''
-add_noise=False#True#False
+add_noise=False
 add_glitches=True#True
+random_sign_flips=True
 
 
 training_target_SNR_range = [20, 80]
@@ -177,32 +213,90 @@ batch_size=32
 epochs=2000#200#100
 test_size=0.3
 
-#Initialise the dataset classes for training and val
+#Load dataset of EMRI parameters and apply test-train split
 EMRI_params_dir="training_data/EMRI_params.npy"
 EMRI_params_and_SNRs= np.load(EMRI_params_dir, allow_pickle=True)
 train_params, val_params= train_test_split(EMRI_params_and_SNRs, test_size=test_size, random_state=seed)
 
-training_set= EMRIGeneratorTDI(train_params, dim=len_seq, dt=dt, TDI_channels=TDI_channels,
-                                add_noise=add_noise, add_glitches=add_glitches, seed=seed, target_SNR_range=training_target_SNR_range, use_gpu=use_cuda,
-                                random_windows=random_windows,
-                                wavelet_transform=wavelet_transform, Nt=Nt, Nf=Nf, nx=nx, mult=mult)
-validation_set= EMRIGeneratorTDI(val_params, dim=len_seq, dt=dt, TDI_channels=TDI_channels,
-                                  add_noise=add_noise, add_glitches=add_glitches, seed=seed, target_SNR_range=validation_target_SNR_range, use_gpu=use_cuda,
-                                  random_windows=random_windows,
-                                  wavelet_transform=wavelet_transform, Nt=Nt, Nf=Nf, nx=nx, mult=mult)
+#Initialise the EMRI generators for the training and val data
+training_set= EMRIGeneratorTDI(train_params, 
+                               dim=len_seq, 
+                               dt=dt, 
+                               TDI_channels=TDI_channels, 
+                               add_noise=add_noise, 
+                               add_glitches=add_glitches, 
+                               seed=seed, 
+                               target_SNR_range=training_target_SNR_range, 
+                               use_gpu=use_cuda, 
+                               random_windows=random_windows, 
+                               wavelet_transform=wavelet_transform, 
+                               Nt=Nt, 
+                               Nf=Nf, 
+                               nx=nx, 
+                               mult=mult, 
+                               random_sign_flips=random_sign_flips)
 
-#For the training data, we will only train on randomised subsets of the data per epoch for the sake of time
-'''BTW this technique is called 'Repeated Sampling of Random Subsets' '''
+validation_set= EMRIGeneratorTDI(val_params, 
+                                dim=len_seq, 
+                                dt=dt, 
+                                TDI_channels=TDI_channels, 
+                                add_noise=add_noise, 
+                                add_glitches=add_glitches, 
+                                seed=seed, 
+                                target_SNR_range=validation_target_SNR_range, 
+                                use_gpu=use_cuda, 
+                                random_windows=False, 
+                                wavelet_transform=wavelet_transform, 
+                                Nt=Nt, 
+                                Nf=Nf, 
+                                nx=nx, 
+                                mult=mult, 
+                                random_sign_flips=False)
+
+#Get current states so we can reset the val set at each epoch
+val_torch_rng_state = torch.get_rng_state()
+val_cuda_rng_state = torch.cuda.get_rng_state_all()
+val_numpy_rng_state = np.random.get_state()
+val_python_rng_state = random.getstate()
+
+#Set the current state for the EMRI generators
+training_set.set_seed_state(val_torch_rng_state, 
+                            val_cuda_rng_state, 
+                            val_numpy_rng_state)
+
+validation_set.set_seed_state(val_torch_rng_state, 
+                            val_cuda_rng_state, 
+                            val_numpy_rng_state)
+
+#Apply Repeated Sampling of Random Subsets on training data to save time
 samples_per_epoch = 1024
-sampler = torch.utils.data.RandomSampler(training_set, num_samples=samples_per_epoch, replacement=False, generator=g)
+sampler = torch.utils.data.RandomSampler(training_set, 
+                                         num_samples=samples_per_epoch, 
+                                         replacement=False, 
+                                         generator=g)
 
-#For the validation data, we will use a subset of the whole val. data
+#Use a fixed subset of the validation to save time
 no_val_samples= 1024
-validation_subset= torch.utils.data.Subset(validation_set, np.arange(no_val_samples).tolist())
+validation_subset= torch.utils.data.Subset(validation_set, 
+                                           np.arange(no_val_samples).tolist())
 
-#Initialise the data generators as PyTorch dataloaders
-training_dataloader= torch.utils.data.DataLoader(training_set, batch_size=batch_size, sampler=sampler, shuffle=None, drop_last=True, generator=g)
-validation_dataloader= torch.utils.data.DataLoader(validation_subset, batch_size=batch_size, shuffle=True, drop_last=True, generator=g)
+#Initialise training dataloader
+training_dataloader= torch.utils.data.DataLoader(training_set, 
+                                                 batch_size=batch_size, 
+                                                 sampler=sampler, 
+                                                 shuffle=None, 
+                                                 drop_last=True, 
+                                                 generator=g)
+
+#Initialise validation dataloader
+'''Generator needs a fixed state with NO data augmentation'''
+val_g = torch.Generator()
+val_g.manual_seed(seed)
+validation_dataloader= torch.utils.data.DataLoader(validation_subset, 
+                                                   batch_size=batch_size, 
+                                                   shuffle=True, 
+                                                   drop_last=True, 
+                                                   generator=val_g)
 
 #See the architecture of the model
 summary(model, input_size=(batch_size, n_channels, Nf, Nt))#(batch_size, n_channels, Nf, Nt)
@@ -220,56 +314,79 @@ print("#No. epochs: ", epochs)
 print("#################################")
 
 #Initialise a summary writer for tensorboard
-comment=''
-filename_suffix=''
-writer = SummaryWriter(log_dir=None, filename_suffix=filename_suffix, comment=comment)
+log_dir = "/fred/oz303/aboumerd/EMRI_denoising/runs_final/"
+logfolder = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+os.mkdir(log_dir+logfolder)
+comment='simple res_approach, heavy scaling'
+filename_suffix='res_approach'
+writer = SummaryWriter(log_dir= log_dir+logfolder, 
+                       filename_suffix=filename_suffix, 
+                       comment=comment)
 
 #Load example val. data without graphs or extra things we don't need
+'''NOW USING FULL STRENGTH GLITCH BACKGROUNDS'''
+glitch_background_dir= "/fred/oz303/aboumerd/EMRI_Glitches/data_files/glitch_bg_AET/max_glitch_SNR_inf/"
+background_idx = 0
+
 with torch.inference_mode():
     '''IMPORTANT: Using mitigated glitch backgrounds for the val. data!!!!'''
-    validation_set.load_glitch_background(glitch_background_dir="/fred/oz303/aboumerd/EMRI_Glitches/data_files/glitch_bg_AET/max_glitch_SNR_8.0/",
-                                                                background_idx=0)
-    X_EMRIs, y_true_EMRIs, mask_EMRIs = next(iter(validation_dataloader))
+    validation_set.load_glitch_background(glitch_background_dir=glitch_background_dir,
+                                                                background_idx=background_idx)
+    X_EMRIs, y_true_EMRIs, residual, mask_EMRIs, mask_residual = next(iter(validation_dataloader))
 
 #Restrict ourselves to the 1st sample in the batch
 #And convert to channels last format
 X_EMRIs = X_EMRIs[:1,:,:,:].to(memory_format=torch.channels_last)
 y_true_EMRIs = y_true_EMRIs[:1,:,:,:].to(memory_format=torch.channels_last)
 mask_EMRIs = mask_EMRIs[:1,:,:,:].to(memory_format=torch.channels_last)
-
-# Preprocess/rescale example val. data input and targets
-'''
-Maximum of the glitches in A and E at SNRs <8.0 was array([37.57473783, 36.71401857])
-Maximum of the loudest EMRIs in A and E was [30.990543, 30.842495]
-
-It's possible that standardisation may be better suited to wavelet coefficients.
-Let's load up a batch of training data, and plot a histogram. If we see somethhing
-normally distributed then standardisation should be appropriate.
-
-'''
-max_abs_tensor= None#torch.as_tensor([30.990543, 30.842495], device=device)[None,:,None,None]#torch.as_tensor([37.57473783, 36.71401857], device=device)[None,:,None,None]
-# X_transformed = asinh_transform(X_EMRIs, a=1 / 1e-13, c=0.0, forward=True)
-# X_transformed= normalise(X_transformed, scale_factor=max_abs_tensor, forward=True)
-
-# y_transformed = asinh_transform(y_true_EMRIs, a=1 / 1e-13, c=0.0, forward=True)
-# y_transformed= normalise(y_transformed, scale_factor=max_abs_tensor, forward=True)
-
-# corruption = X_EMRIs - y_true_EMRIs
-# corruption_transformed = asinh_transform(corruption, a=1 / 1e-13, c=0.0, forward=True)
-# corruption_transformed= normalise(corruption_transformed, scale_factor=max_abs_tensor, forward=True)
+mask_residual = mask_residual[:1,:,:,:].to(memory_format=torch.channels_last)
+residual = residual[:1,:,:,:].to(memory_format=torch.channels_last)
 
 ##Calculate a mask
-#mask_EMRI = mask_EMRIs#y_transformed/(X_transformed + 1e-4)
-#mask_glitches = corruption_transformed/X_transformed
-#masked_data= mask_EMRI * X_EMRIs#X_transformed
+#mask_transformed = torch.sign(mask_EMRIs) * torch.abs(mask_EMRIs)**(0.2)
 
 ##Let's do a histogram of the mask values
 #plt.figure()
-#plt.imshow(np.abs(mask_EMRI[0,0,:,:].detach().numpy()))
+#plt.imshow(np.abs(mask_EMRIs[0,0,:,:].detach().numpy()))
 #plt.imshow(torch.abs((mask_EMRI*X_EMRIs)[0,0,:,:]).detach().numpy(), cmap="inferno", origin="lower", vmin=0., vmax=1.0)
 #plt.colorbar()
-#plt.hist(mask_EMRI.detach().numpy()[0,0].flatten(), bins=100, log=True)
+#plt.hist(mask_transformed.detach().numpy()[0,0].flatten(), bins=100, log=True)
 #plt.savefig("mask_hist.png")
+
+'''
+#Input has variance of ~114, min/max of [-32,32] ish
+#clean data has min/max of [-40, +40], weird distribution
+#target has min/max of around [-40, +40], weird distribution
+plt.figure()
+plt.hist(mask_EMRIs.cpu().numpy().flatten(), bins=100, log=True)
+plt.savefig("test_data.png")
+'''
+
+"""
+#Code to see the distribution of mask values
+plt.figure()
+while 1 !=0:
+    with torch.inference_mode():
+        '''IMPORTANT: Using mitigated glitch backgrounds for the val. data!!!!'''
+        validation_set.load_glitch_background(glitch_background_dir=glitch_background_dir,
+                                                                    background_idx=0)
+        X_EMRIs, y_true_EMRIs, residual, mask_EMRIs, mask_residual = next(iter(validation_dataloader))
+    #Plot
+    plt.hist(mask_EMRIs.cpu().numpy().flatten(), bins=100, log=True)
+    plt.savefig("mask_hist.png")
+"""
+
+
+'''
+mask = y_true_EMRIs / X_EMRIs
+mask_transformed = mask_EMRIs#torch.sign(mask) * torch.abs(mask)**(0.3)
+plt.figure()
+plt.hist(45.0* torch.abs(mask_EMRIs).cpu().numpy().flatten(), bins=100, log=True)
+plt.hist(mask_EMRIs.cpu().numpy().flatten(), bins=100, log=True)
+plt.hist(np.abs(y_true_EMRIs.cpu().numpy().flatten()), bins=100, log=True)
+# plt.xscale("log")
+plt.savefig("mask_hist.png")
+'''
 
 
 # '''To correctly calculate the "best fit":'''
@@ -294,15 +411,16 @@ time_grid, freq_grid = compute_bins(Nf, Nt, T*365*86400)
 plt.title("Input validation data: Glitchy EMRI")
 plt.xlabel("Time, days")
 plt.ylabel("Freq, Hz")
-plt.imshow(np.abs(X_EMRIs[0,0,:,:].cpu().numpy()),
+plt.imshow(np.abs(X_EMRIs[0,0,:,:].cpu().numpy()),#X_EMRIs#y_true_EMRIs
                     cmap="inferno", origin="lower",
                     interpolation="nearest",
-                    extent=[time_grid[0], time_grid[-1], freq_grid[0], freq_grid[-1]],
+                    extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
                     aspect="auto",
                     # vmax=1.0,
-                    vmin=0.0
-                    #norm="log",
+                    # vmin=0.0
+                    # norm="log",
                     )
+# plt.yscale("log")
 plt.colorbar(label="Rescaled strain")
 plt.savefig("val_EMRI_tf.png")
 '''
@@ -318,52 +436,95 @@ for i in range(0,5):
 '''
 
 #Define a epoch-wise schedule for the glitch rescaling
-glitch_scale_schedule = np.geomspace(1e-9, 1.0, num=100)
-#Define a randomised order of glitch backgrounds
-glitch_background_idxs = np.random.choice(np.arange(1,128), size=epochs-start_epoch)
+# glitch_scale_schedule = np.geomspace(1e-9, 1.0, num=100)
 
-#Define a scheduler for the minimum SNR range
-SNR_min=20.0
-SNR_max=80.0
-schedule_length=200
-def min_SNR_scheduler(epoch, SNR_min=20.0, SNR_max=80.0, schedule_length=120):
-    '''A cosine-based scheduler to smoothly increase the SNR range.'''
-    if epoch > schedule_length:
-        out = SNR_min
-    else:
-        out = float(SNR_max - 0.5*(SNR_max-SNR_min)*(1-np.cos(np.pi*epoch/schedule_length)))
-    # #Make sure anything past the end of the schedule is set to the min SNR
-    # out[schedule_length:] = SNR_min
-    return out
+# #Define a scheduler for the minimum SNR range
+# SNR_min=20.0
+# SNR_max=80.0
+# schedule_length=200
+# def min_SNR_scheduler(epoch, SNR_min=20.0, SNR_max=80.0, schedule_length=120):
+#     '''A cosine-based scheduler to smoothly increase the SNR range.'''
+#     if epoch > schedule_length:
+#         out = SNR_min
+#     else:
+#         out = float(SNR_max - 0.5*(SNR_max-SNR_min)*(1-np.cos(np.pi*epoch/schedule_length)))
+#     # #Make sure anything past the end of the schedule is set to the min SNR
+#     # out[schedule_length:] = SNR_min
+#     return out
 
+
+#Before training, compute the scalogram of the truth
+max_abs_tensor= 53.0
+asinh_scale= 1e23
+inverse = True
+#Truth is only a modulus from being plottable
+y_true_EMRIs = preprocess_signal(y_true_EMRIs, 
+                    asinh_scale=asinh_scale, 
+                    # asinh_shift=asinh_shift, 
+                    max_absolute=max_abs_tensor,
+                    inverse = inverse
+                    )
+y_true_EMRIs = y_true_EMRIs.float().cpu().numpy()
+y_true_EMRI_scalogram = np.abs(y_true_EMRIs)
 
 #Train the model
 for t in range(start_epoch, epochs):
+    print(f"-----------------------------------\n\t\tEpoch {t+1}/{epochs}\n-----------------------------------")
     #Initialise variables for measuring time of an epoch
     start= torch.cuda.Event(enable_timing=True)
     end= torch.cuda.Event(enable_timing=True)
-    print(f"-----------------------------------\n\t\tEpoch {t+1}/{epochs}\n-----------------------------------")
-    #Scheduling the SNR range!
-    # current_min_SNR = min_SNR_scheduler(t, SNR_min=SNR_min, SNR_max=SNR_max, schedule_length=schedule_length)
-    # print(f"Tuning min. SNR to: {current_min_SNR}")
-    # training_set.retune_SNRs(low=current_min_SNR, high=SNR_max)
+    #Apply per-epoch data augmentations on training but NOT validation set
     training_set.retune_SNRs(low=validation_target_SNR_range[0], high=validation_target_SNR_range[1])
-    #Load a randomised glitch background at each epoch
-    print(f"Using glitch BG no. {glitch_background_idxs[t]} at SNR threshold 8")
-    training_set.load_glitch_background(glitch_background_dir="/fred/oz303/aboumerd/EMRI_Glitches/data_files/glitch_bg_AET/max_glitch_SNR_8.0/",
-                                                            background_idx=glitch_background_idxs[t])
+    training_glitch_background_idx = np.random.randint(1,128)
+    print(f"Training set has glitch BG no. {training_glitch_background_idx} at SNR threshold inf")
+    training_set.load_glitch_background(glitch_background_dir=glitch_background_dir,
+                                                        background_idx=training_glitch_background_idx)
+    #Start training loop    
     start.record()
-    train_loop(training_dataloader, model, loss_fn, optimizer, batch_size, train_history, scaler, str(device), use_amp=use_amp, max_abs_tensor=max_abs_tensor)
-    # Log gradients (e.g., at the end of each epoch)
+    train_loop(training_dataloader, 
+               model, 
+               loss_fn, 
+               optimizer, 
+               batch_size, 
+               train_history, 
+               scaler, 
+               str(device), 
+               use_amp=use_amp, 
+               max_abs_tensor=None, 
+               ema=ema,
+               pred_overlap_history=train_pred_overlap_history,
+               residual_overlap_history=train_residual_overlap_history,
+               clipper=clipper,
+               )#model
+    #Reset the seed and state of the validation dataloader before each loop so the validation data doesn't change
+    val_g.manual_seed(seed)
+    validation_set.set_seed_state(val_torch_rng_state, 
+                                val_cuda_rng_state, 
+                                val_numpy_rng_state)
+    #Start val. loop
+    '''Not using ema model for the val loop'''
+    val_loop(validation_dataloader, 
+             model, 
+             loss_fn, 
+             val_history, 
+             scaler, 
+             str(device), 
+             use_amp=use_amp, 
+             max_abs_tensor=None, 
+             pred_overlap_history=val_pred_overlap_history, 
+             input_overlap_history=input_overlap_history,
+             ema=ema,
+             val_history_EMA=val_history_EMA,
+             pred_overlap_history_EMA=val_pred_overlap_history_EMA,
+             residual_overlap_history=val_residual_overlap_history,
+             residual_overlap_history_EMA=val_residual_overlap_history_EMA,
+             )
+    #Step the scheduler after each val loop
+    if scheduler is not None: scheduler.step()#Can need extra arguments depending on the scheduler
+    # Log gradients at the end of each epoch
     for name, param in model.named_parameters():
         if param.grad is not None:
-            writer.add_histogram(f'{name}.grad', param.grad, t)
-    val_loop(validation_dataloader, model, loss_fn, val_history, scaler, str(device), use_amp=use_amp, max_abs_tensor=max_abs_tensor)
-    #Step the optimizer after each val loop
-    if scheduler is not None:
-        scheduler.step(val_history[-1])
-    else:
-        pass
+            writer.add_histogram(f'{name}.grad', torch.nan_to_num(param.grad), t)
     end.record()
 
     #Print time for 1 epoch
@@ -378,9 +539,15 @@ for t in range(start_epoch, epochs):
     checkpoint = {
         'epoch': t,
         'model_state_dict': model.state_dict(),
+        'ema_model_state_dict': ema.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        # 'scheduler_state_dict': scheduler.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'scaler_state_dict': scaler.state_dict(),
         'loss': val_history[-1],
+        'loss_EMA': val_history_EMA[-1],
+        "pred_overlap_history" : val_pred_overlap_history[-1],
+        "pred_overlap_history_EMA" : val_pred_overlap_history_EMA[-1],
+        "input_overlap_history" : input_overlap_history[-1],
         #For reproducibility
         "torch_rng_state": torch.get_rng_state(),
         "cuda_rng_state": torch.cuda.get_rng_state_all(),
@@ -389,6 +556,8 @@ for t in range(start_epoch, epochs):
         "generator_rng_state": g.get_state()
     }
     torch.save(checkpoint, "model_checkpoint.tar")
+    # #Save EMA model
+    # torch.save(ema, "model_ema_checkpoint.tar")
     
     #Save the current history
     '''np.save("train_history_current.npy",train_history)
@@ -398,42 +567,54 @@ for t in range(start_epoch, epochs):
     #Do val. forward pass in inference mode and mixed precision
     with torch.inference_mode():
         with torch.autocast(device_type=str(device), dtype=torch.bfloat16, enabled=use_amp):
-            _, y_pred_EMRIs= model(X_EMRIs)
+            '''Not using ema model for testing'''
+            pred_masks, pred_signals = model(X_EMRIs)
+            # #Split the EMRI and residual mask predictions
+            # pred_EMRI_masks, _ = pred_masks.chunk(2, dim=1)
+            # #Split the EMRI and residual signal predictions
+            # pred_EMRI, _ = pred_signals.chunk(2, dim=1)
+            y_pred_EMRIs = pred_signals#pred_EMRI
+
     #convert prediction to np array
     y_pred_EMRIs= y_pred_EMRIs.float().cpu().numpy()
+    #compute scalogram of prediction
+    y_pred_EMRI_scalogram = np.abs(y_pred_EMRIs)
+
     #Plot the reconstruction and residual
     if wavelet_transform:
         reconstruction_fig, axs = plt.subplots(1,2, sharey=True, figsize=(10, 5),layout='constrained')
         time_grid, freq_grid = compute_bins(Nf, Nt, T*365*86400)
-        vmin=0.
-        vmax=1.0
+        vmin= min(np.min(y_pred_EMRI_scalogram), np.min(y_true_EMRI_scalogram))#0.
+        vmax= max(np.max(y_pred_EMRI_scalogram), np.max(y_true_EMRI_scalogram))#1.0
         reconstruction_fig.suptitle("Val. data reconstruction in A chan. at epoch {:}".format(t+1))
         axs[0].set_title("Masked data")
         axs[1].set_title("Clean data")
         axs[0].set_xlabel("Time, seconds")
         axs[1].set_xlabel("Time, seconds")
         axs[0].set_ylabel("Freq, Hz")
-        im1 = axs[0].imshow(np.abs(y_pred_EMRIs)[0,0,:,:],#[0,0,:,:]#X_transformed.detach().cpu().numpy() - np.arctanh(y_pred_EMRIs)
-                            cmap="inferno", origin="lower",
+        im1 = axs[0].imshow(y_pred_EMRI_scalogram[0,0,:,:],#[0,0,:,:]#X_transformed.detach().cpu().numpy() - np.arctanh(y_pred_EMRIs)
+                            cmap="inferno", 
+                            origin="lower",
                             interpolation="nearest",
                             extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
                             vmin=vmin,
                             vmax=vmax,
                             aspect='auto',
-                            #norm="log",
+                            norm="log",
                             )
-        im2 = axs[1].imshow(np.abs(y_true_EMRIs.detach().cpu().numpy())[0,0,:,:],#[0,0,:,:]#y_pred_EMRIs#best_fit_transformed
-                            cmap="inferno", origin="lower",
+        im2 = axs[1].imshow(y_true_EMRI_scalogram[0,0,:,:],#[0,0,:,:]#y_pred_EMRIs#best_fit_transformed.detach().cpu().numpy()
+                            cmap="inferno", 
+                            origin="lower",
                             interpolation="nearest",
                             extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
                             vmin=vmin,
                             vmax=vmax,
                             aspect='auto',
-                            # norm="log",
+                            norm="log",
                             )
         # plt.colorbar(im1, ax=axs[0], label="Rescaled strain")
-        # plt.colorbar(im2, ax=axs[1], label="Rescaled strain")
-        reconstruction_fig.colorbar(im2, label="Rescaled strain", ax=axs.ravel().tolist())#, shrink=0.75
+        plt.colorbar(im2, ax=axs[1], label="Absolute Wavelet Amplitude")#Rescaled strain
+        #reconstruction_fig.colorbar(im2, label="Rescaled strain", ax=axs.ravel().tolist())#, shrink=0.75
         # reconstruction_fig.tight_layout()
         # axs[0].set_box_aspect(1)
         # axs[1].set_box_aspect(1)
@@ -455,6 +636,14 @@ for t in range(start_epoch, epochs):
     #Record training, val. losses, and reconstructions for tensorboard
     writer.add_scalar("Loss/train", train_history[t-start_epoch], t)
     writer.add_scalar("Loss/validation", val_history[t-start_epoch], t)
+    writer.add_scalar("Loss/validation_EMA", val_history_EMA[t-start_epoch], t)
+    writer.add_scalar("Metric/train_pred_overlap", train_pred_overlap_history[t-start_epoch], t)
+    writer.add_scalar("Metric/train_residual_overlap", train_residual_overlap_history[t-start_epoch], t)
+    writer.add_scalar("Metric/val_pred_overlap", val_pred_overlap_history[t-start_epoch], t)
+    writer.add_scalar("Metric/val_pred_overlap_EMA", val_pred_overlap_history_EMA[t-start_epoch], t)
+    writer.add_scalar("Metric/input_overlap", input_overlap_history[t-start_epoch], t)
+    writer.add_scalar("Metric/val_residual_overlap", val_residual_overlap_history[t-start_epoch], t)
+    writer.add_scalar("Metric/val_residual_overlap_EMA", val_residual_overlap_history_EMA[t-start_epoch], t)
     writer.add_figure("Reconstruction_fig", reconstruction_fig, global_step=t)
 
 #Close the tensorboard writer

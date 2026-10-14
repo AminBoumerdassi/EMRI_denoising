@@ -20,39 +20,53 @@ def standardise_weights_2D(weight):
 class Conv2d_WS(nn.Conv2d):
 
     def __init__(self, in_channels, out_channels, kernel_size, stride=1,
-                 padding=0, dilation=1, groups=1, bias=True):
+                 padding=0, dilation=1, groups=1, bias=True, padding_mode = 'zeros'):
         super(Conv2d_WS, self).__init__(in_channels, out_channels, kernel_size, stride,
-                 padding, dilation, groups, bias)
-
+                 padding, dilation, groups, padding_mode)
+        #define syntactically correct padding for padding layer
+        '''In the style of (pad_top,pad_bottom,pad_left,pad_right) etc.'''
+        self.layer_pad = padding + padding
+        #Handle padding style
+        if padding_mode == 'zeros':
+            self.pad = nn.ZeroPad2d(self.layer_pad)
+        elif padding_mode == 'reflect':
+            self.pad = nn.ReflectionPad2d(self.layer_pad)
+        elif padding_mode == 'replicate':
+            self.pad = nn.ReplicationPad2d(self.layer_pad)
+        elif padding_mode == 'circular':
+            self.pad = nn.CircularPad2d(self.layer_pad)
     def forward(self, x):
         weight = standardise_weights_2D(self.weight)
-        return F.conv2d(x, weight, self.bias, self.stride,
-                        self.padding, self.dilation, self.groups)
+        #Pad input
+        x = self.pad(x)
+        return F.conv2d(x, weight, bias=self.bias, stride=self.stride,
+                        padding=0, dilation=self.dilation, groups=self.groups)
 
 
-def init_weights(net, init_type='normal', gain=0.02):
-    from torch.nn import init
-    def init_func(m):
-        classname = m.__class__.__name__
-        if hasattr(m, 'weight') and (classname.find('Conv') != -1 or classname.find('Linear') != -1):
-            if init_type == 'normal':
-                init.normal(m.weight.data, 0.0, gain)
-            elif init_type == 'xavier':
-                init.xavier_normal(m.weight.data, gain=gain)
-            elif init_type == 'kaiming':
-                init.kaiming_normal(m.weight.data, a=0, mode='fan_in')
-            elif init_type == 'orthogonal':
-                init.orthogonal(m.weight.data, gain=gain)
-            else:
-                raise NotImplementedError('initialization method [%s] is not implemented' % init_type)
-            if hasattr(m, 'bias') and m.bias is not None:
-                init.constant(m.bias.data, 0.0)
-        elif classname.find('BatchNorm2d') != -1:
-            init.normal(m.weight.data, 1.0, gain)
-            init.constant(m.bias.data, 0.0)
+# def init_weights(net, init_type='normal', gain=0.02):
+#     from torch.nn import init
+#     def init_func(m):
+#         classname = m.__class__.__name__
+#         if hasattr(m, 'weight') and (classname.find('Conv') != -1 or classname.find('Linear') != -1):
+#             if init_type == 'normal':
+#                 init.normal(m.weight.data, 0.0, gain)
+#             elif init_type == 'xavier':
+#                 init.xavier_normal(m.weight.data, gain=gain)
+#             elif init_type == 'kaiming':
+#                 init.kaiming_normal(m.weight.data, a=0, mode='fan_in')
+#             elif init_type == 'orthogonal':
+#                 init.orthogonal(m.weight.data, gain=gain)
+#             else:
+#                 raise NotImplementedError('initialization method [%s] is not implemented' % init_type)
+#             if hasattr(m, 'bias') and m.bias is not None:
+#                 init.constant(m.bias.data, 0.0)
+#         elif classname.find('BatchNorm2d') != -1:
+#             init.normal(m.weight.data, 1.0, gain)
+#             init.constant(m.bias.data, 0.0)
 
-    print('initialize network with %s' % init_type)
-    net.apply(init_func)
+#     print('initialize network with %s' % init_type)
+#     net.apply(init_func)
+
 def get_pad(in_,  ksize, stride, atrous=1):
     out_ = np.ceil(float(in_)/stride)
     return int(((out_ - 1) * stride + atrous*(ksize-1) + 1 - in_)/2)
@@ -64,13 +78,13 @@ class GatedConv2dWithActivation(torch.nn.Module):
     Input: The feature from last layer "I"
     Output:\phi(f(I))*\sigmoid(g(I))
     """
-
     def __init__(self, in_channels, out_channels, kernel_size,
                   stride=1, padding=0, dilation=1, groups=1,
                     bias=True, GN_num_groups=None, WS_conv=False,
                       activation=torch.nn.SiLU(inplace=False),
                       residual=False):
-        super(GatedConv2dWithActivation, self).__init__()
+        super(GatedConv2dWithActivation, self).__init__()#
+        '''Let's try the ReZero technique - it is very easy to implement.'''
         self.activation = activation
         self.GN_num_groups = GN_num_groups
         self.WS_conv = WS_conv
@@ -79,19 +93,23 @@ class GatedConv2dWithActivation(torch.nn.Module):
         #Initialise type of conv
         conv_func = Conv2d_WS if self.WS_conv else torch.nn.Conv2d
         #Initialise conv layers
-        self.conv2d = conv_func(in_channels, 2 * out_channels, kernel_size, stride, padding, dilation, groups, bias=True)
-        self.res_1x1_conv2d = conv_func(in_channels, out_channels, 1, stride, 0, dilation, groups, bias=True)
+        self.conv2d = conv_func(in_channels, 2 * out_channels, kernel_size, stride, padding, dilation, groups, bias=True, padding_mode='reflect')
+        self.res_1x1_conv2d = conv_func(in_channels, out_channels, 1, stride, 0, dilation, groups, bias=True, padding_mode='reflect')
         #Initialise norm layer
         self.group_norm2d = torch.nn.GroupNorm(self.GN_num_groups, in_channels) if self.GN_num_groups is not None else torch.nn.Identity()
         #Initialise sigmoid function for gating
         self.sigmoid = torch.nn.Sigmoid()
         #Initialise different init weight schemes on shared conv and skip gate
-        nn.init.kaiming_normal_(self.conv2d.weight[:, :out_channels, :, :], mode='fan_out', nonlinearity='relu')  # feature
-        nn.init.normal_(self.conv2d.weight[:, out_channels:, :, :], mean=0.0, std=0.01)  # gate
+        nn.init.orthogonal_(self.conv2d.weight[:, :out_channels, :, :], gain=2**0.5, generator=None)
+        nn.init.orthogonal_(self.conv2d.weight[:, out_channels:, :, :], gain=1, generator=None)
+        # nn.init.kaiming_normal_(self.conv2d.weight[:, :out_channels, :, :], mode='fan_out', nonlinearity='relu')  # feature
+        # nn.init.xavier_normal_(self.conv2d.weight[:, out_channels:, :, :], gain=1, generator=None)#nn.init.normal_(self.conv2d.weight[:, out_channels:, :, :], mean=0.0, std=0.01)  # gate
         #Initialise different biases on shared conv
         with torch.no_grad():
             self.conv2d.bias[:out_channels] = 0.0#feature bias
             self.conv2d.bias[out_channels:] = 1.0#apparently better for gating in deep nets
+        # Learnable residual weight, initialized to zero (as per ReZero)
+        self.alpha = nn.Parameter(torch.tensor(0.0))
     def gated(self, mask):
         return self.sigmoid(mask)
     def forward(self, input):
@@ -106,7 +124,7 @@ class GatedConv2dWithActivation(torch.nn.Module):
         # residual
         if self.residual:
             res = self.res_1x1_conv2d(input) if input.shape != gated.shape else input
-            gated = gated + res
+            gated = self.alpha * gated + res
         return gated
 
 class GatedDeConv2dWithActivation(torch.nn.Module):
@@ -138,11 +156,18 @@ class AsymmetricGatedConv2dWithActivation(torch.nn.Module):
     """
     def __init__(self, in_channels, inter_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, GN_num_groups=None, WS_conv=False, activation=torch.nn.SiLU()):
         super(AsymmetricGatedConv2dWithActivation, self).__init__()
-        self.conv2d_in = nn.Conv2d(in_channels, inter_channels, kernel_size=1, bias=True)
+        self.conv2d_in = nn.Conv2d(in_channels, inter_channels, kernel_size=1, bias=True, padding_mode='reflect')
         self.conv2d_time = GatedConv2dWithActivation(inter_channels, inter_channels, (kernel_size, 1), (stride,1), (padding,0), (dilation,1), groups, bias, GN_num_groups, WS_conv, activation)
         self.conv2d_freq = GatedConv2dWithActivation(inter_channels, inter_channels, (1, kernel_size), (1,stride), (0,padding), (1,dilation), groups, bias, GN_num_groups, WS_conv, activation)
-        self.conv2d_out = nn.Conv2d(inter_channels, out_channels, kernel_size=1, bias=True)
-        
+        self.conv2d_out = nn.Conv2d(inter_channels, out_channels, kernel_size=1, bias=True, padding_mode='reflect')
+
+        #initialise weights
+        nn.init.orthogonal_(self.conv2d_in.weight, gain=2**0.5, generator=None)
+        nn.init.orthogonal_(self.conv2d_out.weight, gain=2**0.5, generator=None)
+
+        # nn.init.kaiming_normal_(self.conv2d_in.weight, mode='fan_out', nonlinearity='relu')  # feature
+        # nn.init.kaiming_normal_(self.conv2d_out.weight, mode='fan_out', nonlinearity='relu')  # feature
+
     def forward(self, input):
         out = self.conv2d_in(input)
         out = self.conv2d_time(out)
@@ -251,6 +276,20 @@ class SpectrogramGatedSkip(nn.Module):
 
         self.out_conv = nn.Conv2d(in_enc, out_chans, 1)
 
+        #Initialise weights
+        nn.init.orthogonal_(self.enc_proj[1].weight, gain=2**0.5, generator=None)
+        nn.init.orthogonal_(self.dec_proj[1].weight, gain=2**0.5, generator=None)
+        nn.init.orthogonal_(self.fuse[1].weight, gain=2**0.5, generator=None)
+
+        nn.init.orthogonal_(self.gate[1].weight, gain=1, generator=None)
+
+
+        # nn.init.kaiming_normal_(self.enc_proj[1].weight, mode='fan_out', nonlinearity='relu')  # feature
+        # nn.init.kaiming_normal_(self.dec_proj[1].weight, mode='fan_out', nonlinearity='relu')  # feature
+        # nn.init.kaiming_normal_(self.fuse[1].weight, mode='fan_out', nonlinearity='relu')  # feature
+        
+        # nn.init.xavier_normal_(self.gate[1].weight, gain=1, generator=None)#nn.init.normal_(self.conv2d.weight[:, out_channels:, :, :], mean=0.0, std=0.01)  # gate
+
     def forward(self, x_enc, x_dec):
         if x_enc.shape[2:] != x_dec.shape[2:]:
             x_dec = F.interpolate(x_dec, size=x_enc.shape[2:], mode='bilinear', align_corners=False)
@@ -284,8 +323,8 @@ class HybridASPP(nn.Module):
 
         # --- Anisotropic branches ---
         self.b2 = AsymmetricGatedConv2dWithActivation(in_ch, inter_chan, out_branch_ch, 3, dilation=2, padding=2)
-        self.b3 = AsymmetricGatedConv2dWithActivation(in_ch, inter_chan, out_branch_ch, 3, dilation=4, padding=4)
-        self.b4 = AsymmetricGatedConv2dWithActivation(in_ch, inter_chan, out_branch_ch, 3, dilation=8, padding=8)
+        self.b3 = AsymmetricGatedConv2dWithActivation(in_ch, inter_chan, out_branch_ch, 3, dilation=4, padding=4)#dilation=4, padding=4
+        self.b4 = AsymmetricGatedConv2dWithActivation(in_ch, inter_chan, out_branch_ch, 3, dilation=8, padding=8)#dilation=8, padding=8
 
         #Pooling branch
         self.b5 = nn.Sequential(
@@ -299,6 +338,15 @@ class HybridASPP(nn.Module):
             nn.SiLU(),
             nn.Conv2d(out_ch + inter_chan, out_ch, kernel_size=1),
         )
+
+        #Set initial weights on layers
+        nn.init.orthogonal_(self.fuse[1].weight, gain=2**0.5, generator=None)
+        nn.init.orthogonal_(self.b5[2].weight, gain=2**0.5, generator=None)
+        nn.init.orthogonal_(self.b1[1].weight, gain=2**0.5, generator=None)
+
+        # nn.init.kaiming_normal_(self.fuse[1].weight, mode='fan_out', nonlinearity='relu')  # feature
+        # nn.init.kaiming_normal_(self.b5[2].weight, mode='fan_out', nonlinearity='relu')  # feature
+        # nn.init.kaiming_normal_(self.b1[1].weight, mode='fan_out', nonlinearity='relu')  # feature
 
     def forward(self, x):
         b1 = self.b1(x)
@@ -328,6 +376,16 @@ class CBAM(nn.Module):
         )
 
         self.spatial = nn.Conv2d(2, 1, kernel_size=7, padding=3)
+
+        #Set initial weights on layers
+        nn.init.orthogonal_(self.mlp[0].weight, gain=2**0.5, generator=None)
+
+        nn.init.orthogonal_(self.mlp[2].weight, gain=1, generator=None)
+        nn.init.orthogonal_(self.spatial.weight, gain=1, generator=None)
+
+        # nn.init.kaiming_normal_(self.mlp[0].weight, mode='fan_out', nonlinearity='relu')  # feature
+        # nn.init.xavier_normal_(self.mlp[1].weight, gain=1, generator=None)#nn.init.normal_(self.conv2d.weight[:, out_channels:, :, :], mean=0.0, std=0.01)  # gate
+        # nn.init.xavier_normal_(self.spatial.weight, gain=1, generator=None)#nn.init.normal_(self.conv2d.weight[:, out_channels:, :, :], mean=0.0, std=0.01)  # gate
 
     def forward(self, x):
         #No pre-activation

@@ -58,10 +58,24 @@ logging.getLogger("pywavelet").setLevel(logging.ERROR)
 
 class EMRIGeneratorTDI(torch.utils.data.Dataset):
     'Generates data for PyTorch'
-    def __init__(self, EMRI_params_and_SNRs, waveform_model="FastSchwarzschildEccentricFlux" ,
-                 dim=2**21, dt=10.,  TDI_channels="AE", target_SNR_range=[70,80],
-                seed=2023, add_noise=False, add_glitches=False, use_gpu = True, random_windows=False,
-                wavelet_transform=False, Nt=None, Nf=None, nx=None, mult=None):
+    def __init__(self, 
+                 EMRI_params_and_SNRs,
+                 waveform_model="FastSchwarzschildEccentricFlux", 
+                 dim=2**21, 
+                 dt=10.,  
+                 TDI_channels="AE", 
+                 target_SNR_range=[70,80], 
+                 seed=2023, 
+                 add_noise=False, 
+                 add_glitches=False, 
+                 use_gpu = True, 
+                 random_windows=False, 
+                 wavelet_transform=False,
+                 random_sign_flips=False, 
+                 Nt=None, 
+                 Nf=None, 
+                 nx=None, 
+                 mult=None):
         'Initialization'
         self.EMRI_params_and_SNRs= copy.copy(EMRI_params_and_SNRs)#shape: (no. EMRIs, no. parameters + SNR)
         self.EMRI_params_set_size= self.EMRI_params_and_SNRs.shape[0]
@@ -80,6 +94,8 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         #For use in the glitch generation
         self.add_glitches = add_glitches
         self.glitch_scale_factor = 1.0
+        #For data augmentation
+        self.random_sign_flips = random_sign_flips
         #Pywavelet kwargs
         self.wavelet_transform=wavelet_transform
         self.Nt=Nt
@@ -99,7 +115,7 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
             self.xp.cuda.ExternalStream(torch_stream)
             #Also share memory pool between torch and cp
             '''NOTE: this makes errors messages extremely verbose. Temporarily disable whenever debugging is needed'''
-            ppe.cuda.use_torch_mempool_in_cupy()
+            #ppe.cuda.use_torch_mempool_in_cupy()
         else:
             self.xp =np
             self.xp_signal = sp_signal
@@ -114,11 +130,12 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         inspiral_kwargs = {}
         sum_kwargs = {"pad_output": True}
         amplitude_kwargs = {}
-        waveform_generator = GenerateEMRIWaveform(waveform_model,
-                                           force_backend=self.backend_type,
-                                             sum_kwargs=sum_kwargs,
-                                             inspiral_kwargs=inspiral_kwargs,
-                                             amplitude_kwargs=amplitude_kwargs)
+        waveform_generator = GenerateEMRIWaveform(waveform_model, 
+                                                  force_backend=self.backend_type, 
+                                                  sum_kwargs=sum_kwargs, 
+                                                  inspiral_kwargs=inspiral_kwargs, 
+                                                  amplitude_kwargs=amplitude_kwargs
+                                                  )
         #Initialise the backend for pywavelet
         if wavelet_transform:
             pywavelet.set_backend("cupy", "float64") if use_gpu else pywavelet.set_backend("numpy", "float64")
@@ -133,13 +150,31 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
             self.T= 2.0
             long_dim = int(self.T*365*86400/dt)
             #Init TDI wrapper
-            self.TDI_wrapper= init_TDI(waveform_generator, long_dim, self.dt, tdi_chan=TDI_channels, orbit_obj=EqualArmlengthOrbits, use_gpu=use_gpu)
+            self.TDI_wrapper= init_TDI(waveform_generator, 
+                                       long_dim, 
+                                       self.dt, 
+                                       tdi_chan=TDI_channels, 
+                                       orbit_obj=EqualArmlengthOrbits, 
+                                       use_gpu=use_gpu
+                                       )
         else:
             self.T= (dim*dt/YRSID_SI)+0.005#A tiny bit extra on T to ensure output length =>dim
             #Initialise the TDI wrapper
-            self.TDI_wrapper= init_TDI(waveform_generator, self.dim, self.dt, tdi_chan=TDI_channels, orbit_obj=EqualArmlengthOrbits, use_gpu=use_gpu)
+            self.TDI_wrapper= init_TDI(waveform_generator, 
+                                       self.dim, 
+                                       self.dt, 
+                                       tdi_chan=TDI_channels, 
+                                       orbit_obj=EqualArmlengthOrbits, 
+                                       use_gpu=use_gpu
+                                       )
         # Construct the PSD
-        self.PSD_AE = noise_PSD_AE(dim, dt, TDI = 'TDI2', include_foreground=True, model='scirdv1', xp=self.xp)
+        self.PSD_AE = noise_PSD_AE(dim, 
+                                   dt, 
+                                   TDI = 'TDI2', 
+                                   include_foreground=True, 
+                                   model='scirdv1', 
+                                   xp=self.xp
+                                   )
         #Tune the luminosity distances to ensure the SNRs are in the target range
         self.retune_SNRs(low=target_SNR_range[0], high=target_SNR_range[1])
         #Load a glitch background if needed, rescale, and resample
@@ -152,7 +187,7 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
             #Resample the cropped glitch background to match the 0.1Hz fs
             # self.glitches_td_AET = self.xp.array([self.xp_signal.resample_poly(self.glitches_td_AET[channel,:], 1,5, axis=-1) for channel in range(self.glitches_td_AET.shape[0])])
             #Initialise the rescaled glitches
-            self.retune_glitches(glitch_scale_factor=1.0)
+            # self.retune_glitches(glitch_scale_factor=1.0)
             # self.glitch_scale_factor = 1.0
             # self.rescaled_glitches_td_AET = self.glitch_scale_factor * self.glitches_td_AET
     def __len__(self):
@@ -160,12 +195,12 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         return self.EMRI_params_set_size
     def __getitem__(self, index):
         'Generates one sample of data'
-        X, y, mask = self.data_generation(index)
+        X, y, residual, mask_X, mask_residual = self.data_generation(index)
         #Do a batch-wise noise-gen
         #Do a batch-wise summation of waveform and noise
         #Do a batch-wise noise-whitening
         #Do a batch-wise conversion of xp arr to torch tensor
-        return X, y, mask            
+        return X, y, residual, mask_X, mask_residual
     def data_generation(self, index):
         'Generate a single noise-whitened TDI EMRI.'
         #Choose a random start point in the window if needed
@@ -176,49 +211,37 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         else:
             #Generate the list of waveforms, convert to array, then truncate to the correct length
             waveform= self.xp.asarray(generate_TDI_EMRI(self.EMRI_params_and_SNRs[index,:-1], self.TDI_wrapper))[:,:self.dim]
+        #Randomly flip sign of the ORIGINAL waveform
+        if self.random_sign_flips: waveform *= self.xp.random.choice([1.0,-1.0], size=1)
         #Initialise the input signal array
-        signal_AET = self.xp.zeros_like(waveform)#self.xp.copy(waveform)
+        signal_AET = self.xp.zeros_like(waveform)
+        #Add the clean EMRI to the data
         signal_AET += waveform
-        #Add noise and glitches if desired
-        if self.add_noise:
-            signal_AET += noise_td_AET(self.dim, self.dt, self.PSD_AE, return_cupy=self.use_gpu)
+        #Add the stationary noise to the data
+        if self.add_noise: signal_AET += 1.0 * noise_td_AET(self.dim, self.dt, self.PSD_AE, return_cupy=self.use_gpu)
+        #Add glitches to the data
         if self.add_glitches:
-            '''Much too slow to load a new glitch background for every training sample.
-            Stick to loading once per epoch.'''
-            # #Specify the directory of glitch backgrounds
-            # glitch_background_dir = "/fred/oz303/aboumerd/EMRI_Glitches/data_files/glitch_bg_AET/max_glitch_SNR_inf/"
-            # #Glob the glitch backgrounds
-            # glitch_background_files = glob.glob(glitch_background_dir + "BG_*.h5")
-            # #Randomly select a file from the globbed list
-            # rand_idx = np.random.randint(0, len(glitch_background_files)-1)
-            # #Randomly choose a file
-            # glitch_background_file = glitch_background_files[rand_idx]
-            # #Load file
-            # with File(glitch_background_file, 'r') as f:
-            #     '''
-            #     Note: the cupy implementation of resample_poly is broken
-            #     for multidimensional arrays so use it channel by channel.
-            #     '''
-            #     long_glitches_td_AET = self.xp.array([f["A"][()], f["E"][()]])#
-            #     glitch_dt= f["dt"][()]#Original fs of 0.5Hz
-            # glitch_target_len= int(self.dt*self.dim/glitch_dt)
+            '''Only changing glitch backgrounds per-epoch due to long I/O times.'''
             #Create a randomised window of the 2y glitch background
             start_idx = np.random.randint(0, self.glitches_td_AET.shape[-1] - signal_AET.shape[-1] - 1)
             end_idx = start_idx + signal_AET.shape[-1]
             #Crop the background to match the length of the input signal
-            cropped_glitches_td_AET = self.rescaled_glitches_td_AET[: , start_idx:end_idx]#signal_AET.shape[-1]
-            # #Resample the cropped glitch background to match the 0.1Hz fs
-            # glitches_td_AET = self.xp.array([self.xp_signal.resample_poly(cropped_glitches_td_AET[channel,:], 1,5, axis=-1) for channel in range(cropped_glitches_td_AET.shape[0])])
-            #Randomly flip the glitch background by +-1
-            cropped_glitches_td_AET *= self.xp.random.choice([1.0,-1.0], size=1)
-            #Rescale the glitch backgrounds by some factor as a form of curriculum learning
-            # self.glitches_td_AET *= self.glitch_scale_factor
-            # #Convert to cupy array if needed
-            # if self.use_gpu: glitches_td_AET = self.xp.asarray(glitches_td_AET)
+            cropped_glitches_td_AET = self.glitches_td_AET[: , start_idx:end_idx]
+            #Randomly flip the sign of the cropped glitches
+            if self.random_sign_flips: cropped_glitches_td_AET *= self.xp.random.choice([1.0,-1.0], size=1)
             signal_AET += cropped_glitches_td_AET
         #Whiten X and y
-        X_t= noise_whiten_AET(signal_AET, self.dt, self.PSD_AE, window=None)
-        y_t= noise_whiten_AET(waveform, self.dt, self.PSD_AE, window=None)
+        window=None
+        X_t= noise_whiten_AET(signal_AET, 
+                              self.dt, 
+                              self.PSD_AE, 
+                              window=window
+                              )
+        y_t= noise_whiten_AET(waveform, 
+                              self.dt, 
+                              self.PSD_AE, 
+                              window=window
+                              )
         #Convert to time-freq domain if desired
         if self.wavelet_transform:
             '''Annoyingly, pywavelet doesn't do multichannel transforms. So we have to transform
@@ -228,31 +251,93 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
                 self.y_timeseries.data = y_t[chan]
                 #Transform the timeseries to t-f
                 #Note that the transforms produce real output that can be +ve or -ve and vary across orders of magnitude
-                self.X_tf[chan] = pywavelet.transforms.from_time_to_wavelet(self.X_timeseries, Nf=self.Nf, Nt=self.Nt, nx=self.nx, mult=self.mult).data#self.X_timeseries.to_wavelet(Nf=self.Nf, Nt=self.Nt).data
-                self.y_tf[chan] = pywavelet.transforms.from_time_to_wavelet(self.y_timeseries, Nf=self.Nf, Nt=self.Nt, nx=self.nx, mult=self.mult).data#self.y_timeseries.to_wavelet(Nf=self.Nf, Nt=self.Nt).data
+                self.X_tf[chan] = pywavelet.transforms.from_time_to_wavelet(self.X_timeseries, 
+                                                                            Nf=self.Nf, 
+                                                                            Nt=self.Nt, 
+                                                                            nx=self.nx, 
+                                                                            mult=self.mult).data#self.X_timeseries.to_wavelet(Nf=self.Nf, Nt=self.Nt).data
+                self.y_tf[chan] = pywavelet.transforms.from_time_to_wavelet(self.y_timeseries, 
+                                                                            Nf=self.Nf, 
+                                                                            Nt=self.Nt, 
+                                                                            nx=self.nx, 
+                                                                            mult=self.mult).data#self.y_timeseries.to_wavelet(Nf=self.Nf, Nt=self.Nt).data
             #Plug into X and y
             X= self.X_tf
             y= self.y_tf
         else:
             X= X_t
             y= y_t
-        #Rescale X and y with an asinh transformation
-        max_abs_tensor= self.xp.array([30.990543, 30.842495])[:,None,None]#torch.as_tensor([37.57473783, 36.71401857], device=device)[None,:,None,None]
-        X = asinh_transform(X, a=1 / 1e-13, c=0.0, forward=True)
-        X= normalise(X, scale_factor=max_abs_tensor, forward=True)
-        y = asinh_transform(y, a=1 / 1e-13, c=0.0, forward=True)
-        y= normalise(y, scale_factor=max_abs_tensor, forward=True)
-        #Calculate the complex mask
-        mask_X = y/X
+        #Calculate the residual
+        residual = X - y
+        #Calculate the complex mask of the target and residual
+        '''Add a small epsilon term for stability'''
+        eps=1e-14
+        mask_X = y/(X)#+eps
+        mask_residual = residual/(X)#+eps
+        #Preprocess X y and residual
+        max_abs_tensor= 53.0#106.0#
+        '''Changing the asinh scaling to a very large number'''
+        asinh_scale= 1e23#1e46#
+        asinh_shift = 0.0
+        inverse = False
+        X = preprocess_signal(X, 
+                              asinh_scale=asinh_scale, 
+                            #   asinh_shift=asinh_shift, 
+                              max_absolute=max_abs_tensor,
+                              inverse = inverse
+                              )
+        y = preprocess_signal(y, 
+                              asinh_scale=asinh_scale, 
+                            #   asinh_shift=asinh_shift, 
+                              max_absolute=max_abs_tensor,
+                              inverse = inverse
+                              )
+        residual = preprocess_signal(residual, 
+                                     asinh_scale=asinh_scale, 
+                                    #  asinh_shift=asinh_shift, 
+                                     max_absolute=max_abs_tensor,
+                                     inverse = inverse
+                                     )
+        #Preprocess the complex masks
+        max_abs= 80.0#45.0
+        '''Changing the asinh scaling to a very large number'''
+        scaling_factor=1e28#1e14
+        mask_X = preprocess_mask(mask_X, 
+                                 max_abs=max_abs,
+                                 scaling_factor=scaling_factor,
+                                #  power_factor=power_factor, 
+                                 inverse=inverse
+                                 )
+        mask_residual = preprocess_mask(mask_residual, 
+                                        max_abs=max_abs,
+                                        scaling_factor=scaling_factor,
+                                #  power_factor=power_factor, 
+                                 inverse=inverse
+                                 )
         #Convert data to float32 precision if needed
-        X= X.astype(self.xp.float32, copy=False)
-        y= y.astype(self.xp.float32, copy=False)
-        mask_X= mask_X.astype(self.xp.float32, copy=False)
+        copy=False
+        X= X.astype(self.xp.float32, 
+                    copy=copy
+                    )#float32
+        y= y.astype(self.xp.float32, 
+                    copy=copy
+                    )#float32
+        residual= residual.astype(self.xp.float32, 
+                                  copy=copy
+                                  )#float32
+        mask_X= mask_X.astype(self.xp.float32, 
+                              copy=copy
+                              )
+        mask_residual = mask_residual.astype(self.xp.float32, 
+                                             copy=copy
+                                             )
         #Convert X and y from xp arrays to PyTorch tensors
-        X= torch.from_dlpack(X)#torch.utils.dlpack.from_dlpack(X.toDlpack()) #torch.as_tensor(X, device=self.device).float()
-        y= torch.from_dlpack(y)#torch.utils.dlpack.from_dlpack(y.toDlpack())#torch.as_tensor(y, device=self.device).float()
-        mask_X = torch.from_dlpack(mask_X)#torch.utils.dlpack.from_dlpack(mask_X.toDlpack())#torch.as_tensor(mask_X, device=self.device).float()
-        return X, y, mask_X
+        X= torch.from_dlpack(X)
+        y= torch.from_dlpack(y)
+        residual= torch.from_dlpack(residual)
+        mask_X = torch.from_dlpack(mask_X)
+        mask_residual = torch.from_dlpack(mask_residual)
+        return X, y, residual, mask_X, mask_residual
     def declare_generator_params(self):
         #Declare generator parameters
         print("#################################")
@@ -285,8 +370,17 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
             glitch_dt= f["dt"][()]#Original fs of 0.5Hz
         #Resample the glitch background
         self.glitches_td_AET = self.xp.array([self.xp_signal.resample_poly(self.glitches_td_AET[channel,:], 1,5, axis=-1) for channel in range(self.glitches_td_AET.shape[0])])
-    def retune_glitches(self, glitch_scale_factor=1.0):
-        '''Rescale the glitch backgrounds by multiplying by alpha'''
-        #Change the scale factor
-        self.glitch_scale_factor = glitch_scale_factor
-        self.rescaled_glitches_td_AET = self.glitch_scale_factor * self.glitches_td_AET
+    def random_flip_on_glitch_background(self):
+        '''Randomly flip the glitch background by +-1'''
+        self.glitches_td_AET *= self.xp.random.choice([1.0,-1.0], size=1)
+    # def retune_glitches(self, glitch_scale_factor=1.0):
+    #     '''Rescale the glitch backgrounds by multiplying by alpha'''
+    #     #Change the scale factor
+    #     self.glitch_scale_factor = glitch_scale_factor
+    #     self.rescaled_glitches_td_AET = self.glitch_scale_factor * self.glitches_td_AET
+    def set_seed_state(self, torch_rng_state, cuda_rng_state, numpy_rng_state):
+        torch.set_rng_state(torch_rng_state.to("cpu"))
+        torch.cuda.set_rng_state_all(cuda_rng_state)#[0].to("cpu")
+        np.random.set_state(numpy_rng_state)
+        # random.setstate(checkpoint["python_rng_state"])
+        # g.set_state(checkpoint["generator_rng_state"].to("cpu"))
