@@ -1,6 +1,6 @@
 #!/bin/bash -e   
 #SBATCH --job-name=EMRI_training   # job name (shows up in the queue)
-#SBATCH --time=00-48:00:00  # Walltime (DD-HH:MM:SS)
+#SBATCH --time=00-06:00:00  # Walltime (DD-HH:MM:SS)
 #SBATCH --partition=milan
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=1   # number of CPUs per task (1 by default)

@@ -3,6 +3,52 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+class criterion(nn.Module):
+
+  def __init__(self):#, alpha=1.0, beta=0.1
+    super(criterion, self).__init__()
+    # self.alpha = alpha  # Weight for MSE component
+    # self.beta = beta  # Weight for L1 penalty component
+    self.si_sdr = SI_SDR_loss()
+
+  def forward(self, predictions, targets):
+    loss_si_sdr = self.si_sdr(predictions, targets)
+    # Combine components as needed
+    return loss_si_sdr#(self.alpha * loss_mse) + (self.beta * loss_l1)
+
+
+class SI_SDR_loss(nn.Module):
+    '''Computes the Scale-Invariant Signal-to-Distortion Ratio (SI-SDR).'''
+    def __init__(self, eps: float = 1e-8) -> None:
+        super(SI_SDR_loss, self).__init__()
+        self.eps = eps
+    def si_sdr(self, preds, target):
+        '''Returns SI-SDR.'''
+
+        # 1. Zero-mean the signals
+        target = target - torch.mean(target, dim=(-1), keepdim=True)
+        preds = preds - torch.mean(preds, dim=(-1), keepdim=True)
+
+        # 2. Project target onto preds to find the scale (alpha)
+        # alpha = <preds, target> / ||target||^2
+        alpha = (preds * target).sum((-1)) / (((target ** 2).sum((-1))) + self.eps)
+        target = target * alpha.unsqueeze(-1)#.unsqueeze(-1)
+        res = preds - target
+        out = 10 * torch.log10(
+            (target ** 2).sum((-1)) / ((res ** 2).sum((-1)) + self.eps) + self.eps
+        )
+        return out
+    
+    def forward(self, preds: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Calculate SI-SDR
+        si_sdr = self.si_sdr(preds, target)
+        # Return negative for minimization
+        return -torch.mean(si_sdr)
+
+
+
+#-----------------------------OLD STUFF
+
 def charbonnier_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6):
     '''Returns charbonnier loss between prediction and target without any reduction.'''
     return torch.sqrt(torch.pow((pred - target), 2) + eps)# - eps

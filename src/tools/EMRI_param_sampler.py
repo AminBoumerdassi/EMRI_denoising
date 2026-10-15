@@ -25,8 +25,10 @@ def sample_EMRI_parameters(no_EMRIs=1):
     '''
     #Intrinsic parameters
     set_of_eta= np.random.uniform(1e-6,1e-4, size= no_EMRIs)#Used indirectly in calculating mu
-    set_of_M= np.random.uniform(1e4, 1e7, size = no_EMRIs)
-    set_of_mu= set_of_eta*set_of_M
+    '''Fix secondary mass to 10 solar masses since it acts as a scaling factor on waveform'''
+    set_of_mu= 10*np.ones(no_EMRIs)#set_of_eta*set_of_M
+    '''Primary mass will depend on mass ratio and secondary mass'''
+    set_of_M= set_of_mu/set_of_eta#np.random.uniform(1e4, 1e7, size = no_EMRIs)
     set_of_a= np.zeros(no_EMRIs)#No spin for schwarzchild model!
     set_of_e0= np.random.uniform(0, .7, size = no_EMRIs)#Initial eccentricity
     set_of_p0= np.random.uniform(10, 16+set_of_e0)#Needs to be based on set_of_e0

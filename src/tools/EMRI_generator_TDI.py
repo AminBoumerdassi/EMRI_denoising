@@ -70,12 +70,8 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
                  add_glitches=False, 
                  use_gpu = True, 
                  random_windows=False, 
-                #  wavelet_transform=False,
-                 random_sign_flips=False, 
-                #  Nt=None, 
-                #  Nf=None, 
-                #  nx=None, 
-                #  mult=None,
+                 random_sign_flips=False,
+                 max_absolute=None, 
                  ):
         'Initialization'
         self.EMRI_params_and_SNRs= copy.copy(EMRI_params_and_SNRs)#shape: (no. EMRIs, no. parameters + SNR)
@@ -97,12 +93,6 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         self.glitch_scale_factor = 1.0
         #For data augmentation
         self.random_sign_flips = random_sign_flips
-        #Pywavelet kwargs
-        # self.wavelet_transform=wavelet_transform
-        # self.Nt=Nt
-        # self.Nf=Nf
-        # self.nx=nx
-        # self.mult=mult
         #Gpu check
         if self.use_gpu == True:
             self.xp = cp
@@ -122,6 +112,8 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
             self.xp_signal = sp_signal
             self.backend_type= "cpu"
             self.device="cpu"
+        #For preprocessing
+        self.max_absolute = self.xp.array(max_absolute)[:,None]
         #initialise RNG for noise generation with a fixed seed
         torch.manual_seed(self.seed)
         torch.cuda.manual_seed_all(self.seed)
@@ -137,15 +129,6 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
                                                   inspiral_kwargs=inspiral_kwargs, 
                                                   amplitude_kwargs=amplitude_kwargs
                                                   )
-        #Initialise the backend for pywavelet
-        # if wavelet_transform:
-        #     pywavelet.set_backend("cupy", "float64") if use_gpu else pywavelet.set_backend("numpy", "float64")
-        #     #Initialise the timeseries objects for X and y
-        #     self.X_timeseries = pywavelet.types.TimeSeries(self.xp.zeros(dim), self.xp.arange(0, self.dim*self.dt, dt))
-        #     self.y_timeseries = pywavelet.types.TimeSeries(self.xp.zeros(dim), self.xp.arange(0, self.dim*self.dt, dt))
-        #     #Initialise an empty array for the wavelet transforms
-        #     self.X_tf= self.xp.zeros((len(TDI_channels), self.Nf, self.Nt))
-        #     self.y_tf= self.xp.zeros((len(TDI_channels), self.Nf, self.Nt))
         #Set the time window to 2 years if we want randomised windows of EMRIs
         if self.random_windows:
             self.T= 2.0
@@ -246,7 +229,7 @@ class EMRIGeneratorTDI(torch.utils.data.Dataset):
         X= X_t
         y= y_t
         #Preprocess X y and residual
-        max_abs_tensor= 53.0#106.0#
+        max_abs_tensor= self.max_absolute
         inverse = False
         X = preprocess_signal(X, 
                               max_absolute=max_abs_tensor,

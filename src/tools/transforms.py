@@ -61,7 +61,7 @@ def preprocess_signal(input, max_absolute=None, inverse=False):
     '''
     if inverse == False:
         #Preprocess forwards
-        out = normalise(out, scale_factor=max_absolute, forward=True)
+        out = normalise(input, scale_factor=max_absolute, forward=True)
     else:
         #Preprocess backwards
         out = normalise(input, scale_factor=max_absolute, forward=False)

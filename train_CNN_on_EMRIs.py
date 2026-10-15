@@ -73,7 +73,7 @@ g.manual_seed(seed)
 model= Dilated_ConvAE().to(device)#ConvAE().to(device)
 
 # Make model in channels-last format for speedup
-model = model.to(memory_format=torch.channels_last)
+#model = model.to(memory_format=torch.channels_last)
 
 #Trick: compile the model
 model = torch.compile(model)
@@ -107,7 +107,7 @@ clipper = QuantileClip(model.parameters(), quantile=0.9, history_length=100)#qua
 # Initialise loss function and optimizer
 lr=3e-3#5e-3#5e-4#1e-4#1e-4#1e-5#1e-4#1e-5#14e-4##benchmark at 14e-4
 weight_decay = 0.0#1e-5
-loss_fn= SubBandCharbonnierLoss().to(device)#nn.L1Loss().to(device)#nn.MSELoss().to(device)#CharbonnierLoss().to(device)#
+loss_fn= criterion().to(device)#nn.MSELoss().
 optimizer= torch.optim.RAdam(params=[
                             {"params": decay, "weight_decay": weight_decay},
                             {"params": no_decay, "weight_decay": 0.0},
@@ -204,6 +204,9 @@ batch_size=32
 epochs=2000#200#100
 test_size=0.3
 
+#Preprocessing parameters
+max_absolute_A_E = np.load("/fred/oz303/aboumerd/EMRI_denoising/preprocessing/max_absolute_A_E.npy")
+
 #Load dataset of EMRI parameters and apply test-train split
 EMRI_params_dir="training_data/EMRI_params.npy"
 EMRI_params_and_SNRs= np.load(EMRI_params_dir, allow_pickle=True)
@@ -220,7 +223,8 @@ training_set= EMRIGeneratorTDI(train_params,
                                target_SNR_range=training_target_SNR_range, 
                                use_gpu=use_cuda, 
                                random_windows=random_windows, 
-                               random_sign_flips=random_sign_flips)
+                               random_sign_flips=random_sign_flips,
+                               max_absolute=max_absolute_A_E)
 
 validation_set= EMRIGeneratorTDI(val_params, 
                                 dim=len_seq, 
@@ -232,7 +236,8 @@ validation_set= EMRIGeneratorTDI(val_params,
                                 target_SNR_range=validation_target_SNR_range, 
                                 use_gpu=use_cuda, 
                                 random_windows=False, 
-                                random_sign_flips=False)
+                                random_sign_flips=False,
+                                max_absolute=max_absolute_A_E)
 
 #Get current states so we can reset the val set at each epoch
 val_torch_rng_state = torch.get_rng_state()
@@ -295,7 +300,7 @@ print("#No. epochs: ", epochs)
 print("#################################")
 
 #Initialise a summary writer for tensorboard
-log_dir = "/fred/oz303/aboumerd/EMRI_denoising/runs_final/"
+log_dir = "/fred/oz303/aboumerd/EMRI_denoising/runs_convtasnet/"
 logfolder = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 os.mkdir(log_dir+logfolder)
 comment='conv-tasnet'
@@ -313,16 +318,12 @@ with torch.inference_mode():
     '''IMPORTANT: Using mitigated glitch backgrounds for the val. data!!!!'''
     validation_set.load_glitch_background(glitch_background_dir=glitch_background_dir,
                                                                 background_idx=background_idx)
-    X_EMRIs, y_true_EMRIs, residual, mask_EMRIs, mask_residual = next(iter(validation_dataloader))
+    X_EMRIs, y_true_EMRIs = next(iter(validation_dataloader))
 
 #Restrict ourselves to the 1st sample in the batch
 #And convert to channels last format
-X_EMRIs = X_EMRIs[:1,:,:,:].to(memory_format=torch.channels_last)
-y_true_EMRIs = y_true_EMRIs[:1,:,:,:].to(memory_format=torch.channels_last)
-mask_EMRIs = mask_EMRIs[:1,:,:,:].to(memory_format=torch.channels_last)
-mask_residual = mask_residual[:1,:,:,:].to(memory_format=torch.channels_last)
-residual = residual[:1,:,:,:].to(memory_format=torch.channels_last)
-
+X_EMRIs = X_EMRIs[:1,:,:]#.to(memory_format=torch.channels_last)
+y_true_EMRIs = y_true_EMRIs[:1,:,:]#.to(memory_format=torch.channels_last)
 
 #Train the model
 for t in range(start_epoch, epochs):
@@ -402,9 +403,9 @@ for t in range(start_epoch, epochs):
         'scaler_state_dict': scaler.state_dict(),
         'loss': val_history[-1],
         'loss_EMA': val_history_EMA[-1],
-        "pred_overlap_history" : val_pred_overlap_history[-1],
-        "pred_overlap_history_EMA" : val_pred_overlap_history_EMA[-1],
-        "input_overlap_history" : input_overlap_history[-1],
+        # "pred_overlap_history" : val_pred_overlap_history[-1],
+        # "pred_overlap_history_EMA" : val_pred_overlap_history_EMA[-1],
+        # "input_overlap_history" : input_overlap_history[-1],
         #For reproducibility
         "torch_rng_state": torch.get_rng_state(),
         "cuda_rng_state": torch.cuda.get_rng_state_all(),
@@ -428,41 +429,108 @@ for t in range(start_epoch, epochs):
             pred_signals = model(X_EMRIs)
 
     #convert prediction to np array
-    y_pred_EMRIs= y_pred_EMRIs.float().cpu().numpy()
-    #compute wavelet transform or stft of prediction 
-    y_pred_EMRIs_wavelet = None#np.abs(y_pred_EMRIs)
+    y_pred_EMRIs= pred_signals.float().cpu().numpy()
+    #compute wavelet transform or stft of prediction
+    y_pred_timeseries = pywavelet.types.TimeSeries(np.zeros(len_seq), np.arange(0, len_seq*dt, dt))
+    y_true_timeseries = pywavelet.types.TimeSeries(np.zeros(len_seq), np.arange(0, len_seq*dt, dt))
+    y_pred_timeseries.data = y_pred_EMRIs[0,0,:]
+    y_true_timeseries.data = y_true_EMRIs[0,0,:]
+    Nf=1000
+    Nt=1000
+    nx=8.0
+    mult=Nt//2
+    y_pred_EMRIs_wavelet = pywavelet.transforms.from_time_to_wavelet(y_pred_timeseries, 
+                                                                Nf=Nf, 
+                                                                Nt=Nt, 
+                                                                nx=nx, 
+                                                                mult=mult).data#self.X_timeseries.to_wavelet(Nf=self.Nf, Nt=self.Nt).data
+
+    y_true_EMRIs_wavelet = pywavelet.transforms.from_time_to_wavelet(y_true_timeseries, 
+                                                                Nf=Nf, 
+                                                                Nt=Nt, 
+                                                                nx=nx, 
+                                                                mult=mult).data#self.X_timeseries.to_wavelet(Nf=self.Nf, Nt=self.Nt).data
+    #Compute scalograms
+    y_pred_EMRI_scalogram = np.abs(y_pred_EMRIs_wavelet)
+    y_true_EMRI_scalogram = np.abs(y_true_EMRIs_wavelet)
+
+    #Compute FFTs of prediction and input
+    '''No bandpassing or windowing for now'''
+    f= np.fft.rfftfreq(n=len_seq, d=dt)
+    y_pred_EMRIs_FFT= np.abs(np.fft.rfft(y_pred_timeseries.data))**2
+    y_true_EMRIs_FFT= np.abs(np.fft.rfft(y_true_timeseries.data))**2
+
     #Plot the reconstruction in the wavelet or stft domain
-    reconstruction_fig, axs = plt.subplots(1,2, sharey=True, figsize=(10, 5),layout='constrained')
+    layout = """
+            ABBB.DEEE
+            ABBB.DEEE
+            ABBB.DEEE
+            .CCC..FFF
+            """
+    reconstruction_fig, axs = plt.subplot_mosaic(layout, layout='constrained', figsize=(10, 5))#plt.subplots(1,2, sharey=True, figsize=(10, 5),layout='constrained')
     reconstruction_fig.suptitle("Val. data reconstruction in A chan. at epoch {:}".format(t+1))
-    axs[0].set_title("Masked data")
-    axs[1].set_title("Clean data")
-    axs[0].set_xlabel("Time, seconds")
-    axs[1].set_xlabel("Time, seconds")
-    axs[0].set_ylabel("Freq, Hz")
-    # time_grid, freq_grid = compute_bins(Nf, Nt, T*365*86400)
-    # vmin= min(np.min(y_pred_EMRI_scalogram), np.min(y_true_EMRI_scalogram))#0.
-    # vmax= max(np.max(y_pred_EMRI_scalogram), np.max(y_true_EMRI_scalogram))#1.0
-    # im1 = axs[0].imshow(y_pred_EMRI_scalogram[0,0,:,:],#[0,0,:,:]#X_transformed.detach().cpu().numpy() - np.arctanh(y_pred_EMRIs)
-    #                     cmap="inferno", 
-    #                     origin="lower",
-    #                     interpolation="nearest",
-    #                     extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
-    #                     vmin=vmin,
-    #                     vmax=vmax,
-    #                     aspect='auto',
-    #                     norm="log",
-    #                     )
-    # im2 = axs[1].imshow(y_true_EMRI_scalogram[0,0,:,:],#[0,0,:,:]#y_pred_EMRIs#best_fit_transformed.detach().cpu().numpy()
-    #                     cmap="inferno", 
-    #                     origin="lower",
-    #                     interpolation="nearest",
-    #                     extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
-    #                     vmin=vmin,
-    #                     vmax=vmax,
-    #                     aspect='auto',
-    #                     norm="log",
-    #                     )
-    #plt.colorbar(im2, ax=axs[1], label="Absolute Wavelet Amplitude")
+    #Set titles
+    axs["B"].set_title("Denoised data")
+    axs["E"].set_title("Clean data")
+    # axs["A"].set_title("FFT power")
+    # axs["D"].set_title("FFT power")
+    # axs["C"].set_title("Time series")
+    # axs["F"].set_title("Time series")
+    #Set labels
+    axs["C"].set_xlabel("Time, seconds")
+    axs["F"].set_xlabel("Time, seconds")
+    axs["A"].set_ylabel("Freq, Hz")
+    axs["D"].set_ylabel("Freq, Hz")
+    axs["A"].set_xlabel("FFT power")
+    axs["D"].set_xlabel("FFT power")
+    axs["C"].set_ylabel("Whitened strain")
+    axs["F"].set_ylabel("Whitened strain")
+    #Make wavelet plots have log axis on freq.
+    axs["B"].set_yscale("log")
+    axs["E"].set_yscale("log")
+    #Make FFT plots have log axes
+    axs["A"].set_xscale("log")
+    axs["A"].set_yscale("log")
+    axs["D"].set_xscale("log")
+    axs["D"].set_yscale("log")
+    # axs[0].set_title("Denoised data")
+    # axs[1].set_title("Clean data")
+    # axs[0].set_xlabel("Time, seconds")
+    # axs[1].set_xlabel("Time, seconds")
+    # axs[0].set_ylabel("Freq, Hz")
+    time_grid, freq_grid = compute_bins(Nf, Nt, T*365*86400)
+    vmin= min(np.min(y_pred_EMRI_scalogram), np.min(y_true_EMRI_scalogram))#0.
+    vmax= max(np.max(y_pred_EMRI_scalogram), np.max(y_true_EMRI_scalogram))#1.0
+    im1 = axs["B"].imshow(y_pred_EMRI_scalogram.get(),#
+                        cmap="inferno", 
+                        origin="lower",
+                        interpolation="nearest",
+                        extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
+                        vmin=vmin,
+                        vmax=vmax,
+                        aspect='auto',
+                        norm="log",
+                        )
+    im2 = axs["E"].imshow(y_true_EMRI_scalogram.get(),#
+                        cmap="inferno", 
+                        origin="lower",
+                        interpolation="nearest",
+                        extent=[time_grid[0], time_grid[-1], freq_grid[1], freq_grid[-1]],
+                        vmin=vmin,
+                        vmax=vmax,
+                        aspect='auto',
+                        norm="log",
+                        )
+    plt.colorbar(im2, ax=axs["E"], label="Absolute Wavelet Amplitude")
+    #Plot time series
+    axs["C"].plot(dt*np.arange(0,len_seq), y_pred_timeseries.data)
+    axs["F"].plot(dt*np.arange(0,len_seq), y_true_timeseries.data)
+    #Plot freq. series
+    axs["A"].plot(y_pred_EMRIs_FFT, f)
+    axs["D"].plot(y_true_EMRIs_FFT, f)
+    #Set axis lims on FFTs to match the wavelet freq bins
+    axs["A"].set_ylim(freq_grid[1], freq_grid[-1])
+    axs["D"].set_ylim(freq_grid[1], freq_grid[-1])
     #Save and close fig
     plt.savefig("reconstructions_td_live_epoch_{:}.png".format(t+1), bbox_inches="tight")#
     plt.close()
@@ -471,13 +539,13 @@ for t in range(start_epoch, epochs):
     writer.add_scalar("Loss/train", train_history[t-start_epoch], t)
     writer.add_scalar("Loss/validation", val_history[t-start_epoch], t)
     writer.add_scalar("Loss/validation_EMA", val_history_EMA[t-start_epoch], t)
-    writer.add_scalar("Metric/train_pred_overlap", train_pred_overlap_history[t-start_epoch], t)
-    writer.add_scalar("Metric/train_residual_overlap", train_residual_overlap_history[t-start_epoch], t)
-    writer.add_scalar("Metric/val_pred_overlap", val_pred_overlap_history[t-start_epoch], t)
-    writer.add_scalar("Metric/val_pred_overlap_EMA", val_pred_overlap_history_EMA[t-start_epoch], t)
-    writer.add_scalar("Metric/input_overlap", input_overlap_history[t-start_epoch], t)
-    writer.add_scalar("Metric/val_residual_overlap", val_residual_overlap_history[t-start_epoch], t)
-    writer.add_scalar("Metric/val_residual_overlap_EMA", val_residual_overlap_history_EMA[t-start_epoch], t)
+    # writer.add_scalar("Metric/train_pred_overlap", train_pred_overlap_history[t-start_epoch], t)
+    # writer.add_scalar("Metric/train_residual_overlap", train_residual_overlap_history[t-start_epoch], t)
+    # writer.add_scalar("Metric/val_pred_overlap", val_pred_overlap_history[t-start_epoch], t)
+    # writer.add_scalar("Metric/val_pred_overlap_EMA", val_pred_overlap_history_EMA[t-start_epoch], t)
+    # writer.add_scalar("Metric/input_overlap", input_overlap_history[t-start_epoch], t)
+    # writer.add_scalar("Metric/val_residual_overlap", val_residual_overlap_history[t-start_epoch], t)
+    # writer.add_scalar("Metric/val_residual_overlap_EMA", val_residual_overlap_history_EMA[t-start_epoch], t)
     writer.add_figure("Reconstruction_fig", reconstruction_fig, global_step=t)
 
 #Close the tensorboard writer
